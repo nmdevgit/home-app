@@ -27,6 +27,10 @@ PM (main Claude session) approves agent requests while the user (Nick) is away.
 - [ ] PM review, ruff/pytest green
 - [ ] Deploy guide for Nick (GitHub + Supabase + Streamlit Cloud steps)
 
+## DEPLOYED 2026-11-23
+Supabase project + both users + household_members/profiles rows done; sign-ups off. GitHub repo nmdevgit/home-app (public, pushed). Streamlit Cloud app deployed; Nick login confirmed working. Pending: Natalie login test, phone home-screen shortcuts, backup repo (backup/README.md).
+Lessons: SUPABASE_URL must start with https://; placeholder secret values give a generic "sign-in failed". TODO: show a clear config error for a bad URL/key instead of a raw exception.
+
 ## Next up
 v1 code COMPLETE and PM-reviewed (60 pytest pass, ruff clean, SQL reviewed, no secrets in repo). docs/DEPLOY.md written.
 Waiting on Nick (back tomorrow): decide public/private repo, give APP_TZ, then do the account steps in docs/DEPLOY.md; first real-Supabase test is still outstanding.
