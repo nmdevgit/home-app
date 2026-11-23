@@ -28,7 +28,7 @@ PM (main Claude session) approves agent requests while the user (Nick) is away.
 - [ ] Deploy guide for Nick (GitHub + Supabase + Streamlit Cloud steps)
 
 ## DEPLOYED 2026-11-23
-Supabase project + both users + household_members/profiles rows done; sign-ups off. GitHub repo nmdevgit/home-app (public, pushed). Streamlit Cloud app deployed; Nick login confirmed working. Pending: Natalie login test, phone home-screen shortcuts, backup repo (backup/README.md).
+Supabase project + both users + household_members/profiles rows done; sign-ups off. GitHub repo nmdevgit/home-app (public, pushed). Streamlit Cloud app deployed; Nick login confirmed working. Pending: Natalie login test, phone home-screen shortcuts, backup repo (backup/README.md) - SKIPPED by Nick, don't push it unless asked (local folder C:\Users\nickm\home-app-backups is unused and can be deleted). Consequence: open the app weekly or Supabase free pauses after 7 days; no backups exist.
 Lessons: SUPABASE_URL must start with https://; placeholder secret values give a generic "sign-in failed". TODO: show a clear config error for a bad URL/key instead of a raw exception.
 
 ## Next up

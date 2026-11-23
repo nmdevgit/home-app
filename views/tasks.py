@@ -68,7 +68,7 @@ def render() -> None:
     st.title("Tasks")
     show_flash()
     _add_form(repo, me)
-    scope = st.segmented_control("Show", ["Mine", "All"], default="Mine", key="t_scope")
+    scope = st.segmented_control("Show", ["Mine", "All"], default="All", key="t_scope")
     status = st.segmented_control("Status", ["Open", "Done"], default="Open", key="t_status")
     tasks: list[Task] = load(lambda: repo.list_tasks(include_done=True))
     shown = filter_tasks(tasks, me, scope != "All", status == "Done")
