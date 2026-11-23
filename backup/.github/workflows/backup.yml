@@ -1,0 +1,41 @@
+name: Daily Supabase backup
+
+# Runs daily. A real database dump counts as activity, so this also stops the
+# free Supabase project from pausing after 7 days of inactivity.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      - name: Dump database
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # Only the app's own tables (public schema). Deliberately NOT dumping
+          # auth (emails/password hashes) or roles: the two logins are re-created
+          # by hand in the Supabase dashboard if ever needed.
+          supabase db dump --db-url "$DB_URL" --schema public -f schema.sql
+          supabase db dump --db-url "$DB_URL" --schema public -f data.sql --use-copy --data-only
+      - name: Commit dumps
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add schema.sql data.sql
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "backup $(date -u +%F)"
+            git push
+          fi
