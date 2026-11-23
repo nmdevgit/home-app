@@ -7,13 +7,14 @@ import zipfile
 
 from core.repo import EXPORT_TABLES, Repository
 
-_DANGEROUS = ("=", "+", "@", "\t", "\r")
+_DANGEROUS = ("=", "+", "-", "@", "\t", "\r")
 
 
 def _cell(value: object) -> str:
     """Stringify; neutralise spreadsheet formulas so a note cannot run code in Excel."""
     text = "" if value is None else str(value)
-    return "'" + text if text.startswith(_DANGEROUS) else text
+    # Check the first non-space character too: " =1+1" is still a formula in some apps.
+    return "'" + text if text.lstrip(" ").startswith(_DANGEROUS) else text
 
 
 def rows_to_csv(rows: list[dict[str, object]]) -> str:
