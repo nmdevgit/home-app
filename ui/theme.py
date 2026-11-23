@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 from datetime import date, timedelta
+from pathlib import Path
 
 import streamlit as st
 
@@ -15,83 +16,7 @@ import streamlit as st
 PERSON_NAMES = {"nick": "Nick", "natalie": "Natalie", "either": "Either"}
 TONES = frozenset({"neutral", "ok", "warn", "bad", "nick", "natalie", "either", "accent"})
 
-CSS = """
-<style>
-:root {
-  --hh-nick: #4263eb; --hh-natalie: #d6336c; --hh-either: #7a8793;
-  --hh-ok: #2b8a3e; --hh-warn: #d9480f; --hh-bad: #e03131; --hh-accent: #0f766e;
-  --hh-line: color-mix(in srgb, var(--text-color) 11%, transparent);
-}
-.block-container { padding-top: 2.2rem; padding-bottom: 4rem; max-width: 42rem; }
-h1 { letter-spacing: -0.02em; font-weight: 750; }
-h2, h3 { letter-spacing: -0.01em; }
-
-/* Cards: any container created with key="card_..." */
-[class*="st-key-card_"] {
-  background: var(--secondary-background-color);
-  border: 1px solid var(--hh-line); border-radius: 18px;
-  padding: 0.35rem 0.5rem;
-  box-shadow: 0 1px 2px rgba(15, 50, 45, 0.06), 0 10px 24px -14px rgba(15, 50, 45, 0.35);
-}
-[class*="st-key-card_"] [data-testid="stVerticalBlockBorderWrapper"] {
-  border-radius: 14px;
-}
-
-/* Tap targets */
-[data-testid^="stBaseButton"] { min-height: 2.75rem; border-radius: 12px; font-weight: 600; }
-[data-testid="stCheckbox"] label { min-height: 2.5rem; align-items: center; }
-[data-testid="stCheckbox"] label p { font-size: 1.02rem; }
-[data-testid="stExpander"] summary { min-height: 2.75rem; }
-[data-testid="stExpander"] { border-radius: 14px; }
-input, textarea, [data-baseweb="select"] > div { border-radius: 12px !important; }
-
-/* Hero */
-.hh-hero {
-  background: linear-gradient(135deg, #0f766e 0%, #134e4a 100%); color: #fff;
-  border-radius: 22px; padding: 1.25rem 1.25rem 1.1rem; margin-bottom: 1rem;
-  box-shadow: 0 14px 30px -16px rgba(19, 78, 74, 0.8);
-}
-.hh-hero .hh-hi { font-size: 1.7rem; font-weight: 780; letter-spacing: -0.02em; line-height: 1.15; }
-.hh-hero .hh-date { opacity: 0.8; font-size: 0.95rem; margin-top: 0.15rem; }
-.hh-hero .hh-prog { margin-top: 0.9rem; font-size: 0.92rem; font-weight: 600; }
-.hh-track { height: 10px; border-radius: 99px; background: rgba(255,255,255,0.22); margin-top: 0.4rem; }
-.hh-fill { height: 100%; border-radius: 99px; background: #fff; }
-
-/* Section headings */
-.hh-section { display: flex; align-items: center; gap: 0.5rem; margin: 1.3rem 0 0.4rem;
-  font-size: 1.1rem; font-weight: 720; letter-spacing: -0.01em; }
-.hh-count { font-size: 0.78rem; font-weight: 700; padding: 0.05rem 0.5rem; border-radius: 99px;
-  background: var(--hh-line); }
-.hh-section.hh-bad .hh-count { background: color-mix(in srgb, var(--hh-bad) 18%, transparent);
-  color: var(--hh-bad); }
-
-/* Badges and avatars */
-.hh-row { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin: 0.1rem 0 0.3rem; }
-.hh-badge { --c: var(--text-color); display: inline-flex; align-items: center; gap: 0.35rem;
-  padding: 0.12rem 0.6rem; border-radius: 99px; font-size: 0.78rem; font-weight: 650; color: var(--c);
-  background: color-mix(in srgb, var(--c) 14%, transparent); white-space: nowrap; }
-.hh-t-ok { --c: var(--hh-ok); } .hh-t-warn { --c: var(--hh-warn); } .hh-t-bad { --c: var(--hh-bad); }
-.hh-t-nick { --c: var(--hh-nick); } .hh-t-natalie { --c: var(--hh-natalie); }
-.hh-t-either { --c: var(--hh-either); } .hh-t-accent { --c: var(--hh-accent); }
-.hh-av { display: inline-flex; align-items: center; justify-content: center; width: 1.25rem;
-  height: 1.25rem; border-radius: 50%; color: #fff; font-size: 0.7rem; font-weight: 800;
-  background: var(--c); }
-
-/* Empty states and big numbers */
-.hh-empty { text-align: center; padding: 1.4rem 1rem; border: 1.5px dashed var(--hh-line);
-  border-radius: 18px; }
-.hh-empty b { display: block; font-size: 1.05rem; margin-bottom: 0.2rem; }
-.hh-empty span { opacity: 0.7; font-size: 0.92rem; }
-.hh-balance { text-align: center; padding: 1.2rem 0.5rem; }
-.hh-balance .hh-amt { font-size: 2.3rem; font-weight: 800; letter-spacing: -0.03em; }
-.hh-balance .hh-who { opacity: 0.75; font-size: 0.95rem; }
-
-@media (max-width: 640px) {
-  .block-container { padding-left: 1rem; padding-right: 1rem; }
-  .hh-hero .hh-hi { font-size: 1.45rem; }
-}
-</style>
-"""  # noqa: E501
+CSS = "<style>" + (Path(__file__).with_name("theme.css")).read_text(encoding="utf-8") + "</style>"
 
 
 def inject() -> None:

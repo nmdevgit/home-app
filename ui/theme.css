@@ -1,0 +1,108 @@
+/* Home app design system. Fixed constant: never interpolate user text into this file.
+   Compatibility notes (iPhone Safari / Samsung Internet / Chrome Android):
+   - inputs stay 16px so iOS never zooms the page on focus
+   - color-mix() always has a plain rgba() fallback line before it (older Safari/Samsung)
+   - env(safe-area-inset-*) for notches; touch-action avoids double-tap-zoom delay
+   - system font stack: SF on iPhone, Roboto/One UI on Samsung, nothing downloaded */
+:root {
+  color-scheme: light dark;
+  --hh-nick: #4263eb; --hh-natalie: #d6336c; --hh-either: #7a8793;
+  --hh-ok: #2b8a3e; --hh-warn: #d9480f; --hh-bad: #e03131; --hh-accent: #0f766e;
+  --hh-line: rgba(128, 128, 128, 0.22);
+  --hh-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+.stApp { -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
+.stApp :is(p, label, li, h1, h2, h3, h4, h5, h6, button, input, textarea, a, summary) {
+  font-family: var(--hh-font);
+}
+[data-testid="stHeader"] { background: transparent; }
+
+/* Layout */
+.block-container {
+  padding-top: 1.6rem; max-width: 40rem;
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+  padding-bottom: calc(4rem + env(safe-area-inset-bottom));
+}
+
+/* Type scale (base size is set in config.toml) */
+h1 { font-size: 1.6rem; letter-spacing: -0.025em; font-weight: 760; line-height: 1.15; }
+h2 { font-size: 1.25rem; letter-spacing: -0.015em; font-weight: 720; }
+h3 { font-size: 1.08rem; letter-spacing: -0.01em; font-weight: 700; }
+[data-testid="stCaptionContainer"], small { font-size: 0.8rem; }
+[data-testid="stCheckbox"] label p { font-size: 0.98rem; }
+.stApp input, .stApp textarea, .stApp [data-baseweb="select"] input { font-size: 16px !important; }
+
+/* Cards: any container created with key="card_..." */
+[class*="st-key-card_"] {
+  background: var(--secondary-background-color);
+  border: 1px solid var(--hh-line); border-radius: 16px;
+  padding: 0.3rem 0.45rem;
+  box-shadow: 0 1px 2px rgba(15, 50, 45, 0.05), 0 8px 20px -14px rgba(15, 50, 45, 0.35);
+}
+[class*="st-key-card_"] [data-testid="stVerticalBlockBorderWrapper"] { border-radius: 12px; }
+
+/* Controls: 44px+ tap targets, quick press feedback, no double-tap-zoom delay */
+button, a, summary, label, [role="button"], input, select, textarea { touch-action: manipulation; }
+[data-testid^="stBaseButton"] {
+  min-height: 2.75rem; border-radius: 12px; font-weight: 600; font-size: 0.95rem;
+  transition: transform 0.08s ease, box-shadow 0.15s ease;
+}
+[data-testid^="stBaseButton"]:active { transform: scale(0.98); }
+[data-testid="stBaseButton-primary"] { box-shadow: 0 6px 14px -9px rgba(15, 118, 110, 0.9); }
+[data-testid="stCheckbox"] label { min-height: 2.5rem; align-items: center; }
+[data-testid="stExpander"] summary { min-height: 2.75rem; }
+[data-testid="stExpander"] { border-radius: 14px; }
+input, textarea, [data-baseweb="select"] > div { border-radius: 12px !important; }
+
+/* Hero */
+.hh-hero {
+  background: #0f766e; background: linear-gradient(135deg, #0f766e 0%, #134e4a 100%);
+  color: #fff; border-radius: 20px; padding: 1.1rem 1.15rem 1rem; margin-bottom: 0.9rem;
+  box-shadow: 0 14px 30px -18px rgba(19, 78, 74, 0.85);
+}
+.hh-hero .hh-hi { font-size: 1.45rem; font-weight: 770; letter-spacing: -0.02em; line-height: 1.15; }
+.hh-hero .hh-date { opacity: 0.8; font-size: 0.88rem; margin-top: 0.15rem; }
+.hh-hero .hh-prog { margin-top: 0.8rem; font-size: 0.85rem; font-weight: 600; }
+.hh-track { height: 8px; border-radius: 99px; background: rgba(255, 255, 255, 0.22); margin-top: 0.4rem; }
+.hh-fill { height: 100%; border-radius: 99px; background: #fff; }
+
+/* Section headings */
+.hh-section { display: flex; align-items: center; gap: 0.5rem; margin: 1.15rem 0 0.35rem;
+  font-size: 1.02rem; font-weight: 720; letter-spacing: -0.01em; }
+.hh-count { font-size: 0.72rem; font-weight: 700; padding: 0.05rem 0.5rem; border-radius: 99px;
+  background: var(--hh-line); }
+.hh-section.hh-bad .hh-count { color: var(--hh-bad); background: rgba(224, 49, 49, 0.16);
+  background: color-mix(in srgb, var(--hh-bad) 18%, transparent); }
+
+/* Badges and avatars */
+.hh-row { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; margin: 0.1rem 0 0.3rem; }
+.hh-badge { --c: var(--text-color); display: inline-flex; align-items: center; gap: 0.3rem;
+  padding: 0.1rem 0.55rem; border-radius: 99px; font-size: 0.74rem; font-weight: 650; color: var(--c);
+  background: rgba(128, 128, 128, 0.16);
+  background: color-mix(in srgb, var(--c) 14%, transparent); white-space: nowrap; }
+.hh-t-ok { --c: var(--hh-ok); } .hh-t-warn { --c: var(--hh-warn); } .hh-t-bad { --c: var(--hh-bad); }
+.hh-t-nick { --c: var(--hh-nick); } .hh-t-natalie { --c: var(--hh-natalie); }
+.hh-t-either { --c: var(--hh-either); } .hh-t-accent { --c: var(--hh-accent); }
+.hh-av { display: inline-flex; align-items: center; justify-content: center; width: 1.15rem;
+  height: 1.15rem; border-radius: 50%; color: #fff; font-size: 0.66rem; font-weight: 800;
+  background: var(--c); }
+
+/* Empty states and big numbers */
+.hh-empty { text-align: center; padding: 1.2rem 1rem; border: 1.5px dashed var(--hh-line);
+  border-radius: 16px; }
+.hh-empty b { display: block; font-size: 0.98rem; margin-bottom: 0.2rem; }
+.hh-empty span { opacity: 0.7; font-size: 0.85rem; }
+.hh-balance { text-align: center; padding: 1rem 0.5rem; font-variant-numeric: tabular-nums; }
+.hh-balance .hh-amt { font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; }
+.hh-balance .hh-who { opacity: 0.75; font-size: 0.88rem; }
+
+@media (max-width: 640px) {
+  .hh-hero .hh-hi { font-size: 1.3rem; }
+  h1 { font-size: 1.45rem; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}

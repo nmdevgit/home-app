@@ -10,6 +10,7 @@ toolbarMode = "minimal"
 
 [theme]
 baseRadius = "large"
+baseFontSize = 15
 showWidgetBorder = true
 font = "sans-serif"
 
