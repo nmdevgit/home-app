@@ -21,15 +21,22 @@ from core.repo import (
     Assignee,
     Bill,
     BillRecurrence,
+    Expense,
+    ExpenseKind,
+    ExpenseSplit,
     GroceryCategory,
     GroceryItem,
     Meal,
     MealSlot,
     Note,
+    Person,
     Priority,
     Recurrence,
     StorageUsage,
+    Subtask,
     Task,
+    Template,
+    TemplateKind,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,7 +55,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TEXT,
     archived_at TEXT,
     priority TEXT NOT NULL DEFAULT 'normal',
-    rotate INTEGER NOT NULL DEFAULT 0
+    rotate INTEGER NOT NULL DEFAULT 0,
+    completed_by TEXT
 );
 CREATE TABLE IF NOT EXISTS grocery_items (
     id TEXT PRIMARY KEY,
@@ -91,6 +99,38 @@ CREATE TABLE IF NOT EXISTS notes (
     updated_at TEXT NOT NULL,
     archived_at TEXT
 );
+CREATE TABLE IF NOT EXISTS subtasks (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks (id),
+    title TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+);
+CREATE TABLE IF NOT EXISTS expenses (
+    id TEXT PRIMARY KEY,
+    day TEXT NOT NULL,
+    description TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    paid_by TEXT NOT NULL,
+    split TEXT NOT NULL DEFAULT 'equal',
+    kind TEXT NOT NULL DEFAULT 'expense',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+);
+CREATE TABLE IF NOT EXISTS templates (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    name TEXT NOT NULL,
+    items TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks (task_id, archived_at);
+CREATE INDEX IF NOT EXISTS idx_expenses_day ON expenses (day);
 CREATE INDEX IF NOT EXISTS idx_meals_day ON meals (day);
 CREATE INDEX IF NOT EXISTS idx_bills_due ON bills (due_date);
 CREATE INDEX IF NOT EXISTS idx_notes_order ON notes (pinned, updated_at);
@@ -108,6 +148,12 @@ CREATE TRIGGER IF NOT EXISTS bills_no_delete BEFORE DELETE ON bills
 BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
 CREATE TRIGGER IF NOT EXISTS notes_no_delete BEFORE DELETE ON notes
 BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
+CREATE TRIGGER IF NOT EXISTS subtasks_no_delete BEFORE DELETE ON subtasks
+BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
+CREATE TRIGGER IF NOT EXISTS expenses_no_delete BEFORE DELETE ON expenses
+BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
+CREATE TRIGGER IF NOT EXISTS templates_no_delete BEFORE DELETE ON templates
+BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
 """
 
 # Columns added after v1; older dev database files get them via ALTER TABLE.
@@ -115,12 +161,13 @@ _ADDED_COLUMNS = (
     ("tasks", "priority", "TEXT NOT NULL DEFAULT 'normal'"),
     ("tasks", "rotate", "INTEGER NOT NULL DEFAULT 0"),
     ("grocery_items", "category", "TEXT NOT NULL DEFAULT 'other'"),
+    ("tasks", "completed_by", "TEXT"),
 )
 STORAGE_LIMIT_BYTES = 500 * 1024 * 1024
 
 _TASK_COLUMNS = (
     "id, title, notes, assignee, due_date, recurrence, status, "
-    "created_by, created_at, completed_at, priority, rotate"
+    "created_by, created_at, completed_at, priority, rotate, completed_by"
 )
 _GROCERY_COLUMNS = "id, name, quantity, checked, added_by, created_at, category"
 _MEAL_COLUMNS = "id, day, slot, title, ingredients, created_by, created_at"
@@ -128,6 +175,11 @@ _BILL_COLUMNS = (
     "id, name, amount_cents, due_date, recurrence, last_paid_on, created_by, created_at"
 )
 _NOTE_COLUMNS = "id, title, body, pinned, created_by, created_at, updated_at"
+_SUBTASK_COLUMNS = "id, task_id, title, done, created_at"
+_EXPENSE_COLUMNS = (
+    "id, day, description, amount_cents, paid_by, split, kind, created_by, created_at"
+)
+_TEMPLATE_COLUMNS = "id, kind, name, items, created_by, created_at"
 
 
 def _row_to_task(row: sqlite3.Row) -> Task:
@@ -146,6 +198,7 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         ),
         priority=row["priority"],
         rotate=bool(row["rotate"]),
+        completed_by=row["completed_by"],
     )
 
 
@@ -195,6 +248,41 @@ def _row_to_note(row: sqlite3.Row) -> Note:
         created_by=row["created_by"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _row_to_subtask(row: sqlite3.Row) -> Subtask:
+    return Subtask(
+        id=row["id"],
+        task_id=row["task_id"],
+        title=row["title"],
+        done=bool(row["done"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_expense(row: sqlite3.Row) -> Expense:
+    return Expense(
+        id=row["id"],
+        day=date.fromisoformat(row["day"]),
+        description=row["description"],
+        amount_cents=row["amount_cents"],
+        paid_by=row["paid_by"],
+        split=row["split"],
+        kind=row["kind"],
+        created_by=row["created_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_template(row: sqlite3.Row) -> Template:
+    return Template(
+        id=row["id"],
+        kind=row["kind"],
+        name=row["name"],
+        items=row["items"],
+        created_by=row["created_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 
@@ -288,8 +376,9 @@ class SqliteRepository:
         now = rules.utc_now().isoformat()
         with self._conn:
             self._conn.execute(
-                "UPDATE tasks SET status = 'done', completed_at = ? WHERE id = ?",
-                (now, task_id),
+                "UPDATE tasks SET status = 'done', completed_at = ?, completed_by = ? "
+                "WHERE id = ?",
+                (now, self._user_id, task_id),
             )
             if task.recurrence != "none":
                 self._insert_task(
@@ -311,7 +400,8 @@ class SqliteRepository:
         self._require_task(task_id)
         with self._conn:
             self._conn.execute(
-                "UPDATE tasks SET status = 'open', completed_at = NULL WHERE id = ?",
+                "UPDATE tasks SET status = 'open', completed_at = NULL, completed_by = NULL "
+                "WHERE id = ?",
                 (task_id,),
             )
         return self._require_task(task_id)
@@ -555,6 +645,155 @@ class SqliteRepository:
         self._require_note(note_id)
         self._archive("notes", note_id)
 
+    # ---- subtasks ----------------------------------------------------
+    def list_subtasks(self, task_ids: list[str]) -> list[Subtask]:
+        ids = rules.clean_task_ids(task_ids)
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"SELECT {_SUBTASK_COLUMNS} FROM subtasks WHERE archived_at IS NULL "
+            f"AND task_id IN ({marks}) ORDER BY created_at, rowid LIMIT ?",
+            (*ids, rules.MAX_SUBTASKS),
+        ).fetchall()
+        return [_row_to_subtask(r) for r in rows]
+
+    def add_subtask(self, task_id: str, title: str) -> Subtask:
+        clean = rules.clean_subtask_title(title)
+        self._require_task(task_id)
+        sub_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO subtasks (id, task_id, title, done, created_by, created_at) "
+                "VALUES (?, ?, ?, 0, ?, ?)",
+                (sub_id, task_id, clean, self._user_id, rules.utc_now().isoformat()),
+            )
+        return self._require_subtask(sub_id)
+
+    def set_subtask_done(self, subtask_id: str, done: bool) -> Subtask:
+        self._require_subtask(subtask_id)
+        self._update("subtasks", subtask_id, {"done": 1 if rules.clean_bool(done, "done") else 0})
+        return self._require_subtask(subtask_id)
+
+    def archive_subtask(self, subtask_id: str) -> None:
+        self._require_subtask(subtask_id)
+        self._archive("subtasks", subtask_id)
+
+    # ---- expenses ----------------------------------------------------
+    def list_expenses(self, since: date | None = None, limit: int = DEFAULT_LIMIT) -> list[Expense]:
+        sql = f"SELECT {_EXPENSE_COLUMNS} FROM expenses WHERE archived_at IS NULL"
+        params: list[object] = []
+        if since is not None:
+            sql += " AND day >= ?"
+            params.append(rules.clean_required_date(since, "since").isoformat())
+        sql += " ORDER BY day DESC, created_at DESC, rowid DESC LIMIT ?"
+        params.append(rules.clamp_limit(limit))
+        return [_row_to_expense(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    def add_expense(
+        self,
+        day: date,
+        description: str,
+        amount_cents: int,
+        paid_by: Person,
+        split: ExpenseSplit = "equal",
+        kind: ExpenseKind = "expense",
+    ) -> Expense:
+        c = rules.validate_expense(day, description, amount_cents, paid_by, split, kind)
+        exp_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO expenses (id, day, description, amount_cents, paid_by, split, "
+                "kind, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    exp_id,
+                    _db_value(c["day"]),
+                    c["description"],
+                    c["amount_cents"],
+                    c["paid_by"],
+                    c["split"],
+                    c["kind"],
+                    self._user_id,
+                    rules.utc_now().isoformat(),
+                ),
+            )
+        return self._require_expense(exp_id)
+
+    def archive_expense(self, expense_id: str) -> None:
+        self._require_expense(expense_id)
+        self._archive("expenses", expense_id)
+
+    # ---- templates ---------------------------------------------------
+    def list_templates(
+        self, kind: TemplateKind | None = None, limit: int = DEFAULT_LIMIT
+    ) -> list[Template]:
+        sql = f"SELECT {_TEMPLATE_COLUMNS} FROM templates WHERE archived_at IS NULL"
+        params: list[object] = []
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(rules.clean_choice(kind, "kind", rules.TEMPLATE_KINDS))
+        sql += " ORDER BY name COLLATE NOCASE, created_at LIMIT ?"
+        params.append(rules.clamp_limit(limit))
+        return [_row_to_template(r) for r in self._conn.execute(sql, params).fetchall()]
+
+    def add_template(self, kind: TemplateKind, name: str, items: str) -> Template:
+        clean_kind = rules.clean_choice(kind, "kind", rules.TEMPLATE_KINDS)
+        cleaned = rules.validate_template_fields({"name": name, "items": items})
+        tpl_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO templates (id, kind, name, items, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    tpl_id,
+                    clean_kind,
+                    cleaned["name"],
+                    cleaned["items"],
+                    self._user_id,
+                    rules.utc_now().isoformat(),
+                ),
+            )
+        return self._require_template(tpl_id)
+
+    def update_template(self, template_id: str, **fields: object) -> Template:
+        cleaned = rules.validate_template_fields(fields)
+        self._require_template(template_id)
+        self._update("templates", template_id, cleaned)
+        return self._require_template(template_id)
+
+    def archive_template(self, template_id: str) -> None:
+        self._require_template(template_id)
+        self._archive("templates", template_id)
+
+    def template_to_grocery(self, template_id: str) -> int:
+        tpl = self._require_template(template_id)
+        rows = self._conn.execute(
+            "SELECT name FROM grocery_items WHERE archived_at IS NULL"
+        ).fetchall()
+        seen = {r["name"].casefold() for r in rows}
+        added = 0
+        with self._conn:
+            for line in tpl.items.splitlines():
+                name = line.strip()
+                if not name or name.casefold() in seen:
+                    continue
+                seen.add(name.casefold())
+                self._insert_grocery({"name": name, "quantity": "", "category": "other"})
+                added += 1
+        return added
+
+    # ---- people & export ---------------------------------------------
+    def list_members(self) -> dict[str, Person]:
+        return {"nick": "nick", "natalie": "natalie"}
+
+    def export_rows(self, table: str, limit: int = 5000) -> list[dict[str, object]]:
+        name = rules.clean_export_table(table)  # allow-listed, safe to splice
+        rows = self._conn.execute(
+            f"SELECT * FROM {name} ORDER BY created_at, rowid LIMIT ?",
+            (rules.clamp_export_limit(limit),),
+        ).fetchall()
+        return [{k: rules.export_value(row[k]) for k in row.keys()} for row in rows]
+
     # ---- storage meter -----------------------------------------------
     def storage_usage(self) -> StorageUsage:
         try:
@@ -663,6 +902,24 @@ class SqliteRepository:
         if row is None:
             raise NotFoundError(f"note {note_id} not found")
         return _row_to_note(row)
+
+    def _require_subtask(self, subtask_id: str) -> Subtask:
+        row = self._fetch("subtasks", _SUBTASK_COLUMNS, subtask_id)
+        if row is None:
+            raise NotFoundError(f"subtask {subtask_id} not found")
+        return _row_to_subtask(row)
+
+    def _require_expense(self, expense_id: str) -> Expense:
+        row = self._fetch("expenses", _EXPENSE_COLUMNS, expense_id)
+        if row is None:
+            raise NotFoundError(f"expense {expense_id} not found")
+        return _row_to_expense(row)
+
+    def _require_template(self, template_id: str) -> Template:
+        row = self._fetch("templates", _TEMPLATE_COLUMNS, template_id)
+        if row is None:
+            raise NotFoundError(f"template {template_id} not found")
+        return _row_to_template(row)
 
     def _fetch(self, table: str, columns: str, row_id: str) -> sqlite3.Row | None:
         return self._conn.execute(

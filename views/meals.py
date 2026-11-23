@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import streamlit as st
 
 from core.repo import Meal, Repository
-from ui import state
+from ui import state, theme
 from ui.common import load, run, run_value, show_flash, today
 from ui.grouping import week_start
 
@@ -53,8 +53,14 @@ def _to_grocery(repo: Repository, meal_id: str) -> None:
 
 
 def _meal(repo: Repository, meal: Meal) -> None:
-    st.write(f"**{meal.slot.title()}**: {meal.title}")
-    with st.expander("Details / edit"):
+    with st.container(key=f"card_meal_{meal.id}"):
+        st.write(f"**{meal.title}**")
+        theme.pills(theme.badge(meal.slot.title(), "accent"))
+        _meal_details(repo, meal)
+
+
+def _meal_details(repo: Repository, meal: Meal) -> None:
+    with st.expander("Details and edit"):
         key = f"me_{meal.id}"
         st.text_input("Title", value=meal.title, key=f"{key}_t")
         st.selectbox("Slot", SLOTS, index=SLOTS.index(meal.slot), format_func=str.title,
@@ -93,17 +99,19 @@ def render() -> None:
     st.session_state.setdefault("m_week", week_start(today()))
     week: date = st.session_state["m_week"]
     prev_col, mid_col, next_col = st.columns(3)
-    prev_col.button("Prev", on_click=_shift_week, args=(-7,), use_container_width=True)
+    prev_col.button("Prev", icon=":material/chevron_left:", on_click=_shift_week, args=(-7,),
+                    use_container_width=True)
     mid_col.button("This week", on_click=_this_week, use_container_width=True)
-    next_col.button("Next", on_click=_shift_week, args=(7,), use_container_width=True)
+    next_col.button("Next", icon=":material/chevron_right:", on_click=_shift_week, args=(7,),
+                    use_container_width=True)
     end = week + timedelta(days=6)
-    st.caption(f"{week:%d %b} - {end:%d %b %Y}")
+    st.caption(theme.week_label(week))
     _add_form(week)
     meals: list[Meal] = load(lambda: repo.list_meals(week, end, limit=LIMIT))
     slot_rank = {s: n for n, s in enumerate(SLOTS)}
     for offset in range(7):
         day = week + timedelta(days=offset)
-        st.subheader(f"{day:%A %d %b}")
+        theme.section(f"{day:%A %d %b}")
         todays = sorted((m for m in meals if m.day == day), key=lambda m: slot_rank[m.slot])
         if not todays:
             st.caption("Nothing planned.")

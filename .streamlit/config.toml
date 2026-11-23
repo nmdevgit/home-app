@@ -9,5 +9,18 @@ gatherUsageStats = false
 toolbarMode = "minimal"
 
 [theme]
-base = "light"
-primaryColor = "#2f7d5b"
+baseRadius = "large"
+showWidgetBorder = true
+font = "sans-serif"
+
+[theme.light]
+primaryColor = "#0f766e"
+backgroundColor = "#f1f5f4"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#14302b"
+
+[theme.dark]
+primaryColor = "#2dd4bf"
+backgroundColor = "#0e1514"
+secondaryBackgroundColor = "#17211f"
+textColor = "#e6f0ed"

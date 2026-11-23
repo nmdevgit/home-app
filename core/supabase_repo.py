@@ -17,27 +17,38 @@ from core.repo import (
     Assignee,
     Bill,
     BillRecurrence,
+    Expense,
+    ExpenseKind,
+    ExpenseSplit,
     GroceryCategory,
     GroceryItem,
     Meal,
     MealSlot,
     Note,
+    Person,
     Priority,
     Recurrence,
     StorageUsage,
+    Subtask,
     Task,
+    Template,
+    TemplateKind,
 )
 
 logger = logging.getLogger(__name__)
 
 _TASK_COLUMNS = (
     "id,title,notes,assignee,due_date,recurrence,status,created_by,created_at,completed_at,"
-    "priority,rotate"
+    "priority,rotate,completed_by"
 )
 _GROCERY_COLUMNS = "id,name,quantity,checked,added_by,created_at,category"
 _MEAL_COLUMNS = "id,day,slot,title,ingredients,created_by,created_at"
 _BILL_COLUMNS = "id,name,amount_cents,due_date,recurrence,last_paid_on,created_by,created_at"
 _NOTE_COLUMNS = "id,title,body,pinned,created_by,created_at,updated_at"
+_SUBTASK_COLUMNS = "id,task_id,title,done,created_at"
+_EXPENSE_COLUMNS = "id,day,description,amount_cents,paid_by,split,kind,created_by,created_at"
+_TEMPLATE_COLUMNS = "id,kind,name,items,created_by,created_at"
+_EXPORT_PAGE = 1000  # PostgREST's default max rows per response
 STORAGE_LIMIT_BYTES = 500 * 1024 * 1024
 _T = TypeVar("_T")
 
@@ -64,6 +75,7 @@ def _row_to_task(row: dict[str, Any]) -> Task:
         completed_at=_ts(row.get("completed_at")),
         priority=row.get("priority") or "normal",
         rotate=bool(row.get("rotate")),
+        completed_by=str(row["completed_by"]) if row.get("completed_by") else None,
     )
 
 
@@ -123,6 +135,41 @@ def _row_to_note(row: dict[str, Any]) -> Note:
         created_by=str(row["created_by"]),
         created_at=_required_ts(row, "created_at"),
         updated_at=_required_ts(row, "updated_at"),
+    )
+
+
+def _row_to_subtask(row: dict[str, Any]) -> Subtask:
+    return Subtask(
+        id=str(row["id"]),
+        task_id=str(row["task_id"]),
+        title=row["title"],
+        done=bool(row["done"]),
+        created_at=_required_ts(row, "created_at"),
+    )
+
+
+def _row_to_expense(row: dict[str, Any]) -> Expense:
+    return Expense(
+        id=str(row["id"]),
+        day=date.fromisoformat(row["day"]),
+        description=row["description"],
+        amount_cents=int(row["amount_cents"]),
+        paid_by=row["paid_by"],
+        split=row["split"],
+        kind=row["kind"],
+        created_by=str(row["created_by"]),
+        created_at=_required_ts(row, "created_at"),
+    )
+
+
+def _row_to_template(row: dict[str, Any]) -> Template:
+    return Template(
+        id=str(row["id"]),
+        kind=row["kind"],
+        name=row["name"],
+        items=row.get("items") or "",
+        created_by=str(row["created_by"]),
+        created_at=_required_ts(row, "created_at"),
     )
 
 
@@ -238,7 +285,11 @@ class SupabaseRepository:
         row = self._update_one(
             "tasks",
             task_id,
-            {"status": "done", "completed_at": rules.utc_now().isoformat()},
+            {
+                "status": "done",
+                "completed_at": rules.utc_now().isoformat(),
+                "completed_by": self._user_id,
+            },
             extra_eq={"status": "open"},
         )
         if row is None:
@@ -261,7 +312,7 @@ class SupabaseRepository:
 
     def reopen_task(self, task_id: str) -> Task:
         row = self._update_one(
-            "tasks", task_id, {"status": "open", "completed_at": None}
+            "tasks", task_id, {"status": "open", "completed_at": None, "completed_by": None}
         )
         if row is None:
             raise NotFoundError(f"task {task_id} not found")
@@ -377,6 +428,9 @@ class SupabaseRepository:
 
     def meal_to_grocery(self, meal_id: str) -> int:
         meal = self._get_one("meals", _MEAL_COLUMNS, meal_id, _row_to_meal)
+        return self._lines_to_grocery(meal.ingredients)
+
+    def _lines_to_grocery(self, text: str) -> int:
         query = (
             self._client.table("grocery_items")
             .select("name")
@@ -385,7 +439,7 @@ class SupabaseRepository:
         )
         seen = {r["name"].casefold() for r in self._run(query)}
         payloads: list[dict[str, object]] = []
-        for line in meal.ingredients.splitlines():
+        for line in text.splitlines():
             name = line.strip()
             if not name or name.casefold() in seen:
                 continue
@@ -474,6 +528,126 @@ class SupabaseRepository:
 
     def archive_note(self, note_id: str) -> None:
         self._archive("notes", note_id, "note")
+
+    # ---- subtasks ----------------------------------------------------
+    def list_subtasks(self, task_ids: list[str]) -> list[Subtask]:
+        ids = rules.clean_task_ids(task_ids)
+        if not ids:
+            return []
+        query = (
+            self._client.table("subtasks")
+            .select(_SUBTASK_COLUMNS)
+            .in_("task_id", ids)
+            .is_("archived_at", "null")
+            .order("created_at")
+            .limit(rules.MAX_SUBTASKS)
+        )
+        return [_row_to_subtask(r) for r in self._run(query)]
+
+    def add_subtask(self, task_id: str, title: str) -> Subtask:
+        clean = rules.clean_subtask_title(title)
+        self._get_task(task_id)  # NotFoundError for a missing/archived task
+        row = self._insert(
+            "subtasks", {"task_id": task_id, "title": clean, "created_by": self._user_id}
+        )
+        return _row_to_subtask(row)
+
+    def set_subtask_done(self, subtask_id: str, done: bool) -> Subtask:
+        row = self._update_one("subtasks", subtask_id, {"done": rules.clean_bool(done, "done")})
+        if row is None:
+            raise NotFoundError(f"subtask {subtask_id} not found")
+        return _row_to_subtask(row)
+
+    def archive_subtask(self, subtask_id: str) -> None:
+        self._archive("subtasks", subtask_id, "subtask")
+
+    # ---- expenses ----------------------------------------------------
+    def list_expenses(self, since: date | None = None, limit: int = DEFAULT_LIMIT) -> list[Expense]:
+        query = self._client.table("expenses").select(_EXPENSE_COLUMNS).is_("archived_at", "null")
+        if since is not None:
+            query = query.gte("day", rules.clean_required_date(since, "since").isoformat())
+        query = (
+            query.order("day", desc=True)
+            .order("created_at", desc=True)
+            .limit(rules.clamp_limit(limit))
+        )
+        return [_row_to_expense(r) for r in self._run(query)]
+
+    def add_expense(
+        self,
+        day: date,
+        description: str,
+        amount_cents: int,
+        paid_by: Person,
+        split: ExpenseSplit = "equal",
+        kind: ExpenseKind = "expense",
+    ) -> Expense:
+        c = rules.validate_expense(day, description, amount_cents, paid_by, split, kind)
+        return _row_to_expense(self._insert("expenses", {**c, "created_by": self._user_id}))
+
+    def archive_expense(self, expense_id: str) -> None:
+        self._archive("expenses", expense_id, "expense")
+
+    # ---- templates ---------------------------------------------------
+    def list_templates(
+        self, kind: TemplateKind | None = None, limit: int = DEFAULT_LIMIT
+    ) -> list[Template]:
+        query = self._client.table("templates").select(_TEMPLATE_COLUMNS).is_("archived_at", "null")
+        if kind is not None:
+            query = query.eq("kind", rules.clean_choice(kind, "kind", rules.TEMPLATE_KINDS))
+        query = query.order("name").order("created_at").limit(rules.clamp_limit(limit))
+        return [_row_to_template(r) for r in self._run(query)]
+
+    def add_template(self, kind: TemplateKind, name: str, items: str) -> Template:
+        clean_kind = rules.clean_choice(kind, "kind", rules.TEMPLATE_KINDS)
+        cleaned = rules.validate_template_fields({"name": name, "items": items})
+        row = self._insert(
+            "templates", {**cleaned, "kind": clean_kind, "created_by": self._user_id}
+        )
+        return _row_to_template(row)
+
+    def update_template(self, template_id: str, **fields: object) -> Template:
+        cleaned = rules.validate_template_fields(fields)
+        if not cleaned:
+            return self._get_one("templates", _TEMPLATE_COLUMNS, template_id, _row_to_template)
+        row = self._update_one("templates", template_id, cleaned)
+        if row is None:
+            raise NotFoundError(f"template {template_id} not found")
+        return _row_to_template(row)
+
+    def archive_template(self, template_id: str) -> None:
+        self._archive("templates", template_id, "template")
+
+    def template_to_grocery(self, template_id: str) -> int:
+        tpl = self._get_one("templates", _TEMPLATE_COLUMNS, template_id, _row_to_template)
+        return self._lines_to_grocery(tpl.items)
+
+    # ---- people & export ---------------------------------------------
+    def list_members(self) -> dict[str, Person]:
+        rows = self._run(
+            self._client.table("household_members").select("user_id,name").limit(rules.MAX_LIMIT)
+        )
+        return {str(r["user_id"]): r["name"] for r in rows if r.get("name") in rules.PEOPLE}
+
+    def export_rows(self, table: str, limit: int = 5000) -> list[dict[str, object]]:
+        name = rules.clean_export_table(table)
+        wanted = rules.clamp_export_limit(limit)
+        out: list[dict[str, object]] = []
+        while len(out) < wanted:  # page it: PostgREST caps each response (default 1000)
+            start = len(out)
+            end = min(start + _EXPORT_PAGE, wanted) - 1
+            query = (
+                self._client.table(name)
+                .select("*")
+                .order("created_at")
+                .order("id")
+                .range(start, end)
+            )
+            page = self._run(query)
+            out.extend({k: rules.export_value(v) for k, v in row.items()} for row in page)
+            if len(page) < end - start + 1:
+                break  # short page: no more rows
+        return out[:wanted]
 
     # ---- storage meter -----------------------------------------------
     def storage_usage(self) -> StorageUsage:

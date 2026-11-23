@@ -25,7 +25,7 @@ def test_login_page_shows_dev_banner(dev_app: AppTest) -> None:
 def test_login_then_add_grocery(dev_app: AppTest) -> None:
     dev_app.button[0].click().run()
     assert not dev_app.exception
-    assert dev_app.title[0].value == "Today"
+    assert any("Good" in m.value for m in dev_app.markdown)
 
 
 def _page_script() -> None:

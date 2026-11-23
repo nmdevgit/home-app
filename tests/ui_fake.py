@@ -4,7 +4,17 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from core.repo import Bill, GroceryItem, Meal, Note, StorageUsage, Task
+from core.repo import (
+    Bill,
+    Expense,
+    GroceryItem,
+    Meal,
+    Note,
+    StorageUsage,
+    Subtask,
+    Task,
+    Template,
+)
 
 
 def _now() -> datetime:
@@ -21,6 +31,9 @@ class FakeRepo:
         self.meals: dict[str, Meal] = {}
         self.bills: dict[str, Bill] = {}
         self.notes: dict[str, Note] = {}
+        self.subtasks: dict[str, Subtask] = {}
+        self.expenses: dict[str, Expense] = {}
+        self.templates: dict[str, Template] = {}
 
     def _id(self) -> str:
         self.n += 1
@@ -47,7 +60,7 @@ class FakeRepo:
         return self.tasks[task_id]
 
     def complete_task(self, task_id: str) -> Task:
-        return self.update_task(task_id, status="done", completed_at=_now())
+        return self.update_task(task_id, status="done", completed_at=_now(), completed_by="u")
 
     def reopen_task(self, task_id: str) -> Task:
         return self.update_task(task_id, status="open", completed_at=None)
@@ -160,3 +173,64 @@ class FakeRepo:
 
     def storage_usage(self) -> StorageUsage:
         return StorageUsage(450 * 1024 * 1024, 500 * 1024 * 1024)
+
+    # subtasks
+    def list_subtasks(self, task_ids: list[str]) -> list[Subtask]:
+        return [s for s in self.subtasks.values() if s.task_id in task_ids]
+
+    def add_subtask(self, task_id: str, title: str) -> Subtask:
+        sub = Subtask(self._id(), task_id, title, False, _now())
+        self.subtasks[sub.id] = sub
+        return sub
+
+    def set_subtask_done(self, subtask_id: str, done: bool) -> Subtask:
+        from dataclasses import replace
+        self.subtasks[subtask_id] = replace(self.subtasks[subtask_id], done=done)
+        return self.subtasks[subtask_id]
+
+    def archive_subtask(self, subtask_id: str) -> None:
+        self.subtasks.pop(subtask_id)
+
+    # expenses
+    def list_expenses(self, since: date | None = None, limit: int = 300) -> list[Expense]:
+        return list(self.expenses.values())[:limit]
+
+    def add_expense(self, day: date, description: str, amount_cents: int, paid_by: str,
+                    split: str = "equal", kind: str = "expense") -> Expense:
+        exp = Expense(self._id(), day, description, amount_cents, paid_by, split, kind,  # type: ignore[arg-type]
+                      "u", _now())
+        self.expenses[exp.id] = exp
+        return exp
+
+    def archive_expense(self, expense_id: str) -> None:
+        self.expenses.pop(expense_id)
+
+    # templates
+    def list_templates(self, kind: str | None = None, limit: int = 300) -> list[Template]:
+        return [t for t in self.templates.values() if kind in (None, t.kind)][:limit]
+
+    def add_template(self, kind: str, name: str, items: str) -> Template:
+        tpl = Template(self._id(), kind, name, items, "u", _now())  # type: ignore[arg-type]
+        self.templates[tpl.id] = tpl
+        return tpl
+
+    def update_template(self, template_id: str, **fields: Any) -> Template:
+        from dataclasses import replace
+        self.templates[template_id] = replace(self.templates[template_id], **fields)
+        return self.templates[template_id]
+
+    def archive_template(self, template_id: str) -> None:
+        self.templates.pop(template_id)
+
+    def template_to_grocery(self, template_id: str) -> int:
+        lines = [x for x in self.templates[template_id].items.splitlines() if x.strip()]
+        for line in lines:
+            self.add_grocery(line.strip())
+        return len(lines)
+
+    # people and export
+    def list_members(self) -> dict[str, str]:
+        return {"u": "nick"}
+
+    def export_rows(self, table: str, limit: int = 5000) -> list[dict[str, object]]:
+        return [{"id": "1", "title": "=SUM(A1)"}] if table == "notes" else []

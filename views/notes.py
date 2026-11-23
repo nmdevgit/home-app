@@ -4,7 +4,7 @@ from __future__ import annotations
 import streamlit as st
 
 from core.repo import Note, Repository
-from ui import state
+from ui import state, theme
 from ui.common import load, run, show_flash
 
 LIMIT = 200
@@ -34,22 +34,28 @@ def _archive(repo: Repository, note_id: str) -> None:
 
 
 def _note(repo: Repository, note: Note) -> None:
-    label = f"[Pinned] {note.title}" if note.pinned else note.title
-    with st.expander(label):
-        if note.body:
-            st.write(note.body)
-        key = f"ne_{note.id}"
-        st.button("Unpin" if note.pinned else "Pin", key=f"{key}_pin", on_click=_toggle_pin,
-                  args=(repo, note), use_container_width=True)
-        st.text_input("Title", value=note.title, key=f"{key}_t")
-        st.text_area("Note", value=note.body, key=f"{key}_b", height=150)
-        st.checkbox("Pinned", value=note.pinned, key=f"{key}_p")
-        st.button("Save", key=f"{key}_s", type="primary", on_click=_save,
+    with st.container(key=f"card_note_{note.id}"):
+        if note.pinned:
+            theme.pills(theme.badge("Pinned", "accent"))
+        with st.expander(note.title):
+            _note_body(repo, note)
+
+
+def _note_body(repo: Repository, note: Note) -> None:
+    if note.body:
+        st.write(note.body)
+    key = f"ne_{note.id}"
+    st.button("Unpin" if note.pinned else "Pin", key=f"{key}_pin", on_click=_toggle_pin,
+              args=(repo, note), use_container_width=True)
+    st.text_input("Title", value=note.title, key=f"{key}_t")
+    st.text_area("Note", value=note.body, key=f"{key}_b", height=150)
+    st.checkbox("Pinned", value=note.pinned, key=f"{key}_p")
+    st.button("Save", key=f"{key}_s", type="primary", on_click=_save,
+              args=(repo, note.id), use_container_width=True)
+    with st.popover("Archive", use_container_width=True):
+        st.write("Archive this note? It is hidden but kept.")
+        st.button("Yes, archive", key=f"{key}_x", on_click=_archive,
                   args=(repo, note.id), use_container_width=True)
-        with st.popover("Archive", use_container_width=True):
-            st.write("Archive this note? It is hidden but kept.")
-            st.button("Yes, archive", key=f"{key}_x", on_click=_archive,
-                      args=(repo, note.id), use_container_width=True)
 
 
 def render() -> None:
@@ -66,6 +72,6 @@ def render() -> None:
                   args=(repo,), key="n_add")
     notes: list[Note] = load(lambda: repo.list_notes(limit=LIMIT))
     if not notes:
-        st.info("No notes yet.")
+        theme.empty("No notes yet", "Wifi codes, gift ideas, anything worth keeping.")
     for note in notes:
         _note(repo, note)

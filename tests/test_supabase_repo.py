@@ -33,6 +33,7 @@ class FakeQuery:
         self.orders: list[tuple[str, bool]] = []
         self.max_rows: int | None = None
         self._negate = False
+        self.window: tuple[int, int] | None = None
 
     @property
     def not_(self) -> FakeQuery:
@@ -59,6 +60,13 @@ class FakeQuery:
     def lte(self, col: str, val: Any) -> FakeQuery:
         return self._add("lte", col, val)
 
+    def in_(self, col: str, vals: list[Any]) -> FakeQuery:
+        return self._add("in", col, list(vals))
+
+    def range(self, start: int, end: int) -> FakeQuery:
+        self.window = (start, end)
+        return self
+
     def order(self, col: str, desc: bool = False, **_kw: Any) -> FakeQuery:
         self.orders.append((col, desc))
         return self
@@ -74,6 +82,8 @@ class FakeQuery:
                 ok = got == val
             elif kind == "is":
                 ok = got is None  # only 'null' is used
+            elif kind == "in":
+                ok = got in val
             elif kind == "gte":
                 ok = got is not None and got >= val
             else:
@@ -107,6 +117,11 @@ class FakeQuery:
                     "ingredients": "",
                     "slot": "dinner",
                     "last_paid_on": None,
+                    "completed_by": None,
+                    "done": False,
+                    "items": "",
+                    "split": "equal",
+                    "kind": "expense",
                     **item,
                 }
                 self.store.append(row)
@@ -120,6 +135,8 @@ class FakeQuery:
             )
         if self.max_rows is not None:
             rows = rows[: self.max_rows]
+        if self.window is not None:
+            rows = rows[self.window[0] : self.window[1] + 1]
         if self.op == "update":
             for r in rows:
                 r.update(self.payload)
@@ -160,7 +177,10 @@ class FakeRpc:
 class FakeClient:
     def __init__(self) -> None:
         self.stores: dict[str, list[dict[str, Any]]] = {
-            name: [] for name in ("tasks", "grocery_items", "meals", "bills", "notes")
+            name: [] for name in (
+                "tasks", "grocery_items", "meals", "bills", "notes",
+                "subtasks", "expenses", "templates", "household_members",
+            )
         }
         self.log: list[tuple[str, str]] = []
         self.db_size: Any = 12345

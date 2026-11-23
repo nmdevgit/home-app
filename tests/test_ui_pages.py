@@ -55,7 +55,7 @@ def test_page_renders(page: str) -> None:
 
 def test_tasks_priority_marker_and_search() -> None:
     at = _run("tasks")
-    assert any("HIGH" in c.label for c in at.checkbox)
+    assert any("High priority" in m.value for m in at.markdown)
     at.text_input(key="t_search").set_value("lounge").run()
     labels = [c.label for c in at.checkbox if c.key and c.key.startswith("tasks_chk_")]
     assert len(labels) == 1 and "Vacuum" in labels[0]

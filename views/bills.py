@@ -7,18 +7,14 @@ import streamlit as st
 
 from core.repo import Bill, BillRecurrence, Repository
 from core.rules import monthly_equivalent_cents
-from ui import state
+from ui import state, theme
 from ui.common import flash, load, run, show_flash, today
 from ui.grouping import bill_status
 from ui.money import format_cents, parse_cents
 
 RECURRENCES: tuple[BillRecurrence, ...] = ("monthly", "weekly", "fortnightly", "yearly", "none")
-MARKERS = {
-    "overdue": ":red[**OVERDUE**]",
-    "soon": ":orange[**Due soon**]",
-    "paid": ":green[Paid]",
-    "later": "",
-}
+TONES = {"overdue": "bad", "soon": "warn", "paid": "ok", "later": "neutral"}
+STATUS_TEXT = {"overdue": "Overdue", "soon": "Due soon", "paid": "Paid", "later": ""}
 LIMIT = 200
 
 
@@ -88,13 +84,17 @@ def _edit(repo: Repository, bill: Bill) -> None:
 
 def _bill(repo: Repository, bill: Bill, now: date) -> None:
     status = bill_status(bill.due_date, now, bill.last_paid_on)
-    st.write(f"**{bill.name}** - {format_cents(bill.amount_cents)} - due "
-             f"{bill.due_date:%a %d %b} {MARKERS[status]}")
-    if status != "paid":
-        st.button("Mark paid", key=f"bp_{bill.id}", on_click=_paid, args=(repo, bill.id),
-                  use_container_width=True)
-    with st.expander("Edit"):
-        _edit(repo, bill)
+    with st.container(key=f"card_bill_{bill.id}"):
+        st.write(f"**{bill.name}**  {format_cents(bill.amount_cents)}")
+        theme.pills(
+            theme.badge(f"Due {bill.due_date:%a %d %b}", TONES[status]),
+            theme.badge(STATUS_TEXT[status], TONES[status]) if STATUS_TEXT[status] else "",
+        )
+        if status != "paid":
+            st.button("Mark paid", key=f"bp_{bill.id}", icon=":material/check:",
+                      on_click=_paid, args=(repo, bill.id), use_container_width=True)
+        with st.expander("Edit"):
+            _edit(repo, bill)
 
 
 def _add_form(repo: Repository) -> None:
@@ -118,7 +118,7 @@ def render() -> None:
     total = monthly_total_cents(bills)
     st.metric("Monthly total (recurring bills)", format_cents(total))
     if not bills:
-        st.info("No bills yet.")
+        theme.empty("No bills yet", "Add one above to see what is due and when.")
     now = today()
     for bill in sorted(bills, key=lambda b: (b.due_date, b.name.lower())):
         _bill(repo, bill, now)

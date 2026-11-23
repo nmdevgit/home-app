@@ -9,7 +9,6 @@ import streamlit as st
 
 from core import clock
 from core.errors import RepositoryError, ValidationError
-from core.repo import Repository, Task
 from ui import state
 
 LABELS = {"nick": "Nick", "natalie": "Natalie", "either": "Either"}
@@ -33,10 +32,8 @@ def show_flash() -> None:
     for kind, message in st.session_state.pop(FLASH_KEY, []):
         if kind == "error":
             st.error(message)
-        elif kind == "toast":
-            st.toast(message)
         else:
-            st.success(message)
+            st.toast(message, icon=":material/check_circle:")
 
 
 def run(action: Callable[..., Any], *args: Any, ok: str | None = None, **kwargs: Any) -> bool:
@@ -58,30 +55,6 @@ def load(fetch: Callable[[], list[Any]]) -> list[Any]:
     except RepositoryError as exc:
         st.error(friendly(exc))
         return []
-
-
-def _toggle_task(repo: Repository, task: Task, key: str) -> None:
-    if st.session_state.get(key):
-        run(repo.complete_task, task.id)
-    else:
-        run(repo.reopen_task, task.id)
-
-
-def task_checkbox(repo: Repository, task: Task, prefix: str) -> None:
-    """One-line task with a big checkbox that completes/reopens on tick."""
-    key = f"{prefix}_chk_{task.id}"
-    due = f" - due {task.due_date:%a %d %b}" if task.due_date else ""
-    repeat = f" (repeats {task.recurrence})" if task.recurrence != "none" else ""
-    mark = ":red[**HIGH**] " if task.priority == "high" else ""
-    low = " (low)" if task.priority == "low" else ""
-    label = f"{mark}{task.title}{due}{repeat}{low}"
-    st.checkbox(
-        label,
-        value=task.status == "done",
-        key=key,
-        on_change=_toggle_task,
-        args=(repo, task, key),
-    )
 
 
 def today() -> date:

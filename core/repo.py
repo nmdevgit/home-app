@@ -19,6 +19,13 @@ GroceryCategory = Literal[
 ]
 MealSlot = Literal["breakfast", "lunch", "dinner"]
 BillRecurrence = Literal["none", "weekly", "fortnightly", "monthly", "yearly"]
+Person = Literal["nick", "natalie"]
+ExpenseSplit = Literal["equal", "payer_only", "other_only"]
+ExpenseKind = Literal["expense", "settlement"]
+TemplateKind = Literal["shopping", "recipe"]
+EXPORT_TABLES = (
+    "tasks", "subtasks", "grocery_items", "meals", "bills", "notes", "expenses", "templates",
+)
 
 DEFAULT_LIMIT = 300
 
@@ -39,6 +46,43 @@ class Task:
     # When a recurring task is completed, the next occurrence swaps nick<->natalie
     # ('either' stays 'either').
     rotate: bool = False
+    completed_by: str | None = None  # user id of who ticked it done (set by complete_task)
+
+
+@dataclass(frozen=True)
+class Subtask:
+    id: str
+    task_id: str
+    title: str
+    done: bool
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class Expense:
+    """kind='expense': `paid_by` paid `amount_cents` for `description`, split per `split`
+    (equal: half each; payer_only: only payer's cost, no debt; other_only: the other person
+    owes the whole amount). kind='settlement': `paid_by` handed `amount_cents` to the other."""
+    id: str
+    day: date
+    description: str
+    amount_cents: int  # integer cents, 1..100_000_000
+    paid_by: Person
+    split: ExpenseSplit
+    kind: ExpenseKind
+    created_by: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class Template:
+    """Reusable list: a shopping template ('weekly shop') or a recipe."""
+    id: str
+    kind: TemplateKind
+    name: str
+    items: str  # one item/ingredient per line, max 60 lines, 2000 chars
+    created_by: str
+    created_at: datetime
 
 
 @dataclass(frozen=True)
@@ -174,6 +218,50 @@ class Repository(Protocol):
     def add_note(self, title: str, body: str = "", pinned: bool = False) -> Note: ...
     def update_note(self, note_id: str, **fields: object) -> Note: ...
     def archive_note(self, note_id: str) -> None: ...
+
+    # --- subtasks --------------------------------------------------------
+    def list_subtasks(self, task_ids: list[str]) -> list[Subtask]:
+        """All non-archived subtasks for the given tasks in ONE query (no N+1); oldest first."""
+        ...
+    def add_subtask(self, task_id: str, title: str) -> Subtask: ...
+    def set_subtask_done(self, subtask_id: str, done: bool) -> Subtask: ...
+    def archive_subtask(self, subtask_id: str) -> None: ...
+
+    # --- expenses (who owes whom) -----------------------------------------
+    def list_expenses(self, since: date | None = None, limit: int = DEFAULT_LIMIT) -> list[Expense]:
+        """Newest first. Balance maths lives in core.rules.expense_balance_cents."""
+        ...
+    def add_expense(
+        self,
+        day: date,
+        description: str,
+        amount_cents: int,
+        paid_by: Person,
+        split: ExpenseSplit = "equal",
+        kind: ExpenseKind = "expense",
+    ) -> Expense: ...
+    def archive_expense(self, expense_id: str) -> None: ...
+
+    # --- templates (shopping lists + recipes) ---------------------------------
+    def list_templates(
+        self, kind: TemplateKind | None = None, limit: int = DEFAULT_LIMIT
+    ) -> list[Template]: ...
+    def add_template(self, kind: TemplateKind, name: str, items: str) -> Template: ...
+    def update_template(self, template_id: str, **fields: object) -> Template: ...
+    def archive_template(self, template_id: str) -> None: ...
+    def template_to_grocery(self, template_id: str) -> int:
+        """Like meal_to_grocery: adds each line to the grocery list, skipping names already
+        on the active list (case-insensitive). Returns number added."""
+        ...
+
+    # --- people & export --------------------------------------------------
+    def list_members(self) -> dict[str, Person]:
+        """user id -> 'nick'/'natalie' (from household_members; SQLite dev: fixed map)."""
+        ...
+    def export_rows(self, table: str, limit: int = 5000) -> list[dict[str, object]]:
+        """All rows INCLUDING archived, JSON/CSV-friendly values (ISO strings), for the
+        'Download my data' button. `table` must be one of EXPORT_TABLES, else ValidationError."""
+        ...
 
     # --- storage meter ---------------------------------------------------
     def storage_usage(self) -> StorageUsage: ...

@@ -5,18 +5,25 @@ Kept separate so SQLite and Supabase repos enforce identical behaviour.
 from __future__ import annotations
 
 import calendar
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from typing import get_args
 
 from core import clock
 from core.errors import ValidationError
 from core.repo import (
+    EXPORT_TABLES,
     Assignee,
     BillRecurrence,
+    Expense,
+    ExpenseKind,
+    ExpenseSplit,
     GroceryCategory,
     MealSlot,
+    Person,
     Priority,
     Recurrence,
+    TemplateKind,
 )
 
 MAX_TITLE = 200
@@ -29,6 +36,15 @@ MAX_INGREDIENT_CHARS = 2000
 MAX_AMOUNT_CENTS = 100_000_000
 MIN_LIMIT = 1
 MAX_LIMIT = 500
+MAX_EXPORT_LIMIT = 5000
+MAX_SUBTASK_TITLE = 200
+MAX_SUBTASK_TASK_IDS = 200  # one IN(...) query; keeps the PostgREST URL short
+MAX_SUBTASKS = 2000
+MAX_EXPENSE_DESCRIPTION = 200
+MAX_TEMPLATE_NAME = 100
+MAX_TEMPLATE_LINES = 60
+MAX_TEMPLATE_CHARS = 2000
+MAX_TEMPLATE_LINE = 200
 
 ASSIGNEES: frozenset[str] = frozenset(get_args(Assignee))
 RECURRENCES: frozenset[str] = frozenset(get_args(Recurrence))
@@ -36,6 +52,10 @@ PRIORITIES: frozenset[str] = frozenset(get_args(Priority))
 GROCERY_CATEGORIES: frozenset[str] = frozenset(get_args(GroceryCategory))
 MEAL_SLOTS: frozenset[str] = frozenset(get_args(MealSlot))
 BILL_RECURRENCES: frozenset[str] = frozenset(get_args(BillRecurrence))
+PEOPLE: frozenset[str] = frozenset(get_args(Person))
+EXPENSE_SPLITS: frozenset[str] = frozenset(get_args(ExpenseSplit))
+EXPENSE_KINDS: frozenset[str] = frozenset(get_args(ExpenseKind))
+TEMPLATE_KINDS: frozenset[str] = frozenset(get_args(TemplateKind))
 SLOT_ORDER: dict[str, int] = {"breakfast": 0, "lunch": 1, "dinner": 2}
 # Fields update_task may change; everything else is immutable or system-managed.
 UPDATABLE_TASK_FIELDS: frozenset[str] = frozenset(
@@ -47,6 +67,7 @@ UPDATABLE_BILL_FIELDS: frozenset[str] = frozenset(
     {"name", "amount_cents", "due_date", "recurrence"}
 )
 UPDATABLE_NOTE_FIELDS: frozenset[str] = frozenset({"title", "body", "pinned"})
+UPDATABLE_TEMPLATE_FIELDS: frozenset[str] = frozenset({"name", "items"})
 
 
 def utc_now() -> datetime:
@@ -142,6 +163,95 @@ def clean_ingredients(value: object) -> str:
     if len(joined) > MAX_INGREDIENT_CHARS:
         raise ValidationError(f"ingredients must be at most {MAX_INGREDIENT_CHARS} characters")
     return joined
+
+
+def clamp_export_limit(limit: object) -> int:
+    """Clamp an export page size to 1..5000."""
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValidationError("limit must be a whole number")
+    return max(MIN_LIMIT, min(MAX_EXPORT_LIMIT, limit))
+
+
+def clean_subtask_title(value: object) -> str:
+    return clean_text(value, "title", MAX_SUBTASK_TITLE, required=True)
+
+
+def clean_task_ids(task_ids: object) -> list[str]:
+    """Distinct, non-empty string ids (order kept), capped at MAX_SUBTASK_TASK_IDS."""
+    if isinstance(task_ids, str) or not isinstance(task_ids, list | tuple | set | frozenset):
+        raise ValidationError("task_ids must be a list of ids")
+    out: list[str] = []
+    for item in task_ids:
+        if not isinstance(item, str) or not item:
+            raise ValidationError("task ids must be non-empty text")
+        if item not in out:
+            out.append(item)
+    return out[:MAX_SUBTASK_TASK_IDS]
+
+
+def validate_expense(
+    day: object,
+    description: object,
+    amount_cents: object,
+    paid_by: object,
+    split: object,
+    kind: object,
+) -> dict[str, object]:
+    """Validate a new expense/settlement; amount must be 1..100_000_000 cents."""
+    if isinstance(amount_cents, bool) or not isinstance(amount_cents, int):
+        raise ValidationError("amount_cents must be a whole number of cents")
+    if not 1 <= amount_cents <= MAX_AMOUNT_CENTS:
+        raise ValidationError(f"amount_cents must be between 1 and {MAX_AMOUNT_CENTS}")
+    return {
+        "day": clean_required_date(day, "day"),
+        "description": clean_text(description, "description", MAX_EXPENSE_DESCRIPTION, True),
+        "amount_cents": amount_cents,
+        "paid_by": clean_choice(paid_by, "paid_by", PEOPLE),
+        "split": clean_choice(split, "split", EXPENSE_SPLITS),
+        "kind": clean_choice(kind, "kind", EXPENSE_KINDS),
+    }
+
+
+def clean_template_items(value: object) -> str:
+    """One item per line; blank lines dropped; <=60 lines, <=200 chars/line, <=2000 total."""
+    text = clean_text(value, "items", 10 * MAX_TEMPLATE_CHARS, required=False)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > MAX_TEMPLATE_LINES:
+        raise ValidationError(f"items must have at most {MAX_TEMPLATE_LINES} lines")
+    if any(len(line) > MAX_TEMPLATE_LINE for line in lines):
+        raise ValidationError(f"each item must be at most {MAX_TEMPLATE_LINE} characters")
+    joined = "\n".join(lines)
+    if len(joined) > MAX_TEMPLATE_CHARS:
+        raise ValidationError(f"items must be at most {MAX_TEMPLATE_CHARS} characters")
+    return joined
+
+
+def validate_template_fields(fields: dict[str, object]) -> dict[str, object]:
+    _reject_unknown(fields, UPDATABLE_TEMPLATE_FIELDS)
+    cleaned: dict[str, object] = {}
+    for key, value in fields.items():
+        if key == "name":
+            cleaned[key] = clean_text(value, "name", MAX_TEMPLATE_NAME, required=True)
+        else:
+            cleaned[key] = clean_template_items(value)
+    return cleaned
+
+
+def export_value(value: object) -> object:
+    """Convert a DB value to a JSON/CSV-friendly primitive (dates -> ISO strings)."""
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    if isinstance(value, datetime):
+        return (value if value.tzinfo else value.replace(tzinfo=UTC)).astimezone(UTC).isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def clean_export_table(table: object) -> str:
+    if not isinstance(table, str) or table not in EXPORT_TABLES:
+        raise ValidationError(f"table must be one of {list(EXPORT_TABLES)}")
+    return table
 
 
 def _reject_unknown(fields: dict[str, object], allowed: frozenset[str]) -> None:
@@ -311,3 +421,27 @@ def next_due_date(current: date | None, recurrence: str, today: date | None = No
         k += 1
         candidate = _step(base, recurrence, k)
     return candidate
+
+
+def expense_balance_cents(expenses: Iterable[Expense]) -> int:
+    """Net balance in cents: positive = natalie owes nick, negative = nick owes natalie.
+
+    Per expense (amount A, payer P; the other person is O):
+      equal       O owes P half, rounded half up: (A + 1) // 2 (an odd cent goes to the
+                  payer's favour; computed on the positive amount so it is symmetric)
+      payer_only  no debt
+      other_only  O owes P the full A
+      settlement  P handed O the full A: counts like other_only (P is owed A more /
+                  owes A less); the split field is ignored
+    Archived rows are the caller's concern (list_expenses already hides them).
+    """
+    total = 0
+    for exp in expenses:
+        if exp.kind == "settlement" or exp.split == "other_only":
+            owed = exp.amount_cents
+        elif exp.split == "equal":
+            owed = (exp.amount_cents + 1) // 2
+        else:
+            owed = 0
+        total += owed if exp.paid_by == "nick" else -owed
+    return total

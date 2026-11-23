@@ -101,3 +101,33 @@ def bill_status(due: date, today: date, paid_on: date | None = None) -> str:
     if due <= today + timedelta(days=7):
         return "soon"
     return "later"
+
+
+SCHEDULE_ORDER = (
+    ("overdue", "Overdue"),
+    ("today", "Today"),
+    ("week", "This week"),
+    ("later", "Later"),
+    ("none", "No date"),
+)
+
+
+def schedule_bucket(task: Task, today: date) -> str:
+    """Tasks page grouping: overdue / today / week (next 7 days) / later / none."""
+    if task.due_date is None:
+        return "none"
+    if task.due_date < today:
+        return "overdue"
+    if task.due_date == today:
+        return "today"
+    if task.due_date <= today + timedelta(days=7):
+        return "week"
+    return "later"
+
+
+def group_schedule(tasks: Iterable[Task], today: date) -> dict[str, list[Task]]:
+    """Bucket tasks by schedule_bucket, keeping SCHEDULE_ORDER; empty buckets omitted."""
+    out: dict[str, list[Task]] = {key: [] for key, _ in SCHEDULE_ORDER}
+    for task in sort_tasks(tasks):
+        out[schedule_bucket(task, today)].append(task)
+    return {key: items for key, items in out.items() if items}
