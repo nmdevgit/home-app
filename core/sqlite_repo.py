@@ -8,14 +8,29 @@ Mirrors the Supabase schema, including the no-delete guarantee.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-from core import rules
-from core.errors import BackendError, NotFoundError
-from core.repo import Assignee, GroceryItem, Recurrence, Task
+from core import clock, rules
+from core.errors import BackendError, NotFoundError, ValidationError
+from core.repo import (
+    DEFAULT_LIMIT,
+    Assignee,
+    Bill,
+    BillRecurrence,
+    GroceryCategory,
+    GroceryItem,
+    Meal,
+    MealSlot,
+    Note,
+    Priority,
+    Recurrence,
+    StorageUsage,
+    Task,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +46,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     completed_at TEXT,
-    archived_at TEXT
+    archived_at TEXT,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    rotate INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS grocery_items (
     id TEXT PRIMARY KEY,
@@ -40,8 +57,44 @@ CREATE TABLE IF NOT EXISTS grocery_items (
     checked INTEGER NOT NULL DEFAULT 0,
     added_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    archived_at TEXT,
+    category TEXT NOT NULL DEFAULT 'other'
+);
+CREATE TABLE IF NOT EXISTS meals (
+    id TEXT PRIMARY KEY,
+    day TEXT NOT NULL,
+    slot TEXT NOT NULL DEFAULT 'dinner',
+    title TEXT NOT NULL,
+    ingredients TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
     archived_at TEXT
 );
+CREATE TABLE IF NOT EXISTS bills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    due_date TEXT NOT NULL,
+    recurrence TEXT NOT NULL DEFAULT 'monthly',
+    last_paid_on TEXT,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+);
+CREATE TABLE IF NOT EXISTS notes (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL DEFAULT '',
+    pinned INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_meals_day ON meals (day);
+CREATE INDEX IF NOT EXISTS idx_bills_due ON bills (due_date);
+CREATE INDEX IF NOT EXISTS idx_notes_order ON notes (pinned, updated_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_completed ON tasks (completed_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status, archived_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks (due_date);
 CREATE INDEX IF NOT EXISTS idx_grocery_active ON grocery_items (archived_at, checked);
@@ -49,13 +102,32 @@ CREATE TRIGGER IF NOT EXISTS tasks_no_delete BEFORE DELETE ON tasks
 BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
 CREATE TRIGGER IF NOT EXISTS grocery_no_delete BEFORE DELETE ON grocery_items
 BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
+CREATE TRIGGER IF NOT EXISTS meals_no_delete BEFORE DELETE ON meals
+BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
+CREATE TRIGGER IF NOT EXISTS bills_no_delete BEFORE DELETE ON bills
+BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
+CREATE TRIGGER IF NOT EXISTS notes_no_delete BEFORE DELETE ON notes
+BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
 """
+
+# Columns added after v1; older dev database files get them via ALTER TABLE.
+_ADDED_COLUMNS = (
+    ("tasks", "priority", "TEXT NOT NULL DEFAULT 'normal'"),
+    ("tasks", "rotate", "INTEGER NOT NULL DEFAULT 0"),
+    ("grocery_items", "category", "TEXT NOT NULL DEFAULT 'other'"),
+)
+STORAGE_LIMIT_BYTES = 500 * 1024 * 1024
 
 _TASK_COLUMNS = (
     "id, title, notes, assignee, due_date, recurrence, status, "
-    "created_by, created_at, completed_at"
+    "created_by, created_at, completed_at, priority, rotate"
 )
-_GROCERY_COLUMNS = "id, name, quantity, checked, added_by, created_at"
+_GROCERY_COLUMNS = "id, name, quantity, checked, added_by, created_at, category"
+_MEAL_COLUMNS = "id, day, slot, title, ingredients, created_by, created_at"
+_BILL_COLUMNS = (
+    "id, name, amount_cents, due_date, recurrence, last_paid_on, created_by, created_at"
+)
+_NOTE_COLUMNS = "id, title, body, pinned, created_by, created_at, updated_at"
 
 
 def _row_to_task(row: sqlite3.Row) -> Task:
@@ -72,6 +144,8 @@ def _row_to_task(row: sqlite3.Row) -> Task:
         completed_at=(
             datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None
         ),
+        priority=row["priority"],
+        rotate=bool(row["rotate"]),
     )
 
 
@@ -83,30 +157,99 @@ def _row_to_grocery(row: sqlite3.Row) -> GroceryItem:
         checked=bool(row["checked"]),
         added_by=row["added_by"],
         created_at=datetime.fromisoformat(row["created_at"]),
+        category=row["category"],
     )
+
+
+def _row_to_meal(row: sqlite3.Row) -> Meal:
+    return Meal(
+        id=row["id"],
+        day=date.fromisoformat(row["day"]),
+        slot=row["slot"],
+        title=row["title"],
+        ingredients=row["ingredients"],
+        created_by=row["created_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_bill(row: sqlite3.Row) -> Bill:
+    return Bill(
+        id=row["id"],
+        name=row["name"],
+        amount_cents=row["amount_cents"],
+        due_date=date.fromisoformat(row["due_date"]),
+        recurrence=row["recurrence"],
+        last_paid_on=date.fromisoformat(row["last_paid_on"]) if row["last_paid_on"] else None,
+        created_by=row["created_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_note(row: sqlite3.Row) -> Note:
+    return Note(
+        id=row["id"],
+        title=row["title"],
+        body=row["body"],
+        pinned=bool(row["pinned"]),
+        created_by=row["created_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        raise ValidationError("since must be timezone-aware")
+    return value.astimezone(UTC).isoformat()
+
+
+def _db_value(value: object) -> object:
+    return value.isoformat() if isinstance(value, date) else value
 
 
 class SqliteRepository:
     def __init__(self, path: str | Path = ":memory:", user_id: str = "local") -> None:
         self._user_id = user_id
+        self._path = None if str(path) == ":memory:" else Path(path)
         target = path if str(path) == ":memory:" else str(Path(path))
         try:
             # Streamlit runs scripts on worker threads, so allow cross-thread use.
             self._conn = sqlite3.connect(target, check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA)
+            self._add_missing_columns()
         except sqlite3.Error as exc:
             logger.exception("could not open sqlite database")
             raise BackendError("could not open database") from exc
 
+    def _add_missing_columns(self) -> None:
+        for table, column, ddl in _ADDED_COLUMNS:
+            have = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        self._conn.commit()
+
     # ---- tasks -------------------------------------------------------
-    def list_tasks(self, include_done: bool = False) -> list[Task]:
+    def list_tasks(
+        self, include_done: bool = False, limit: int = DEFAULT_LIMIT
+    ) -> list[Task]:
         sql = f"SELECT {_TASK_COLUMNS} FROM tasks WHERE archived_at IS NULL"
         if not include_done:
             sql += " AND status = 'open'"
         # NULL due dates sort last so dated chores surface first.
-        sql += " ORDER BY due_date IS NULL, due_date, created_at"
-        return [_row_to_task(r) for r in self._conn.execute(sql).fetchall()]
+        sql += " ORDER BY due_date IS NULL, due_date, created_at LIMIT ?"
+        rows = self._conn.execute(sql, (rules.clamp_limit(limit),)).fetchall()
+        return [_row_to_task(r) for r in rows]
+
+    def list_done_tasks(self, since: datetime, limit: int = DEFAULT_LIMIT) -> list[Task]:
+        rows = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM tasks WHERE archived_at IS NULL "
+            "AND status = 'done' AND completed_at >= ? "
+            "ORDER BY completed_at DESC, rowid DESC LIMIT ?",
+            (_utc_iso(since), rules.clamp_limit(limit)),
+        ).fetchall()
+        return [_row_to_task(r) for r in rows]
 
     def add_task(
         self,
@@ -115,6 +258,8 @@ class SqliteRepository:
         due_date: date | None = None,
         recurrence: Recurrence = "none",
         notes: str = "",
+        priority: Priority = "normal",
+        rotate: bool = False,
     ) -> Task:
         cleaned = rules.validate_task_fields(
             {
@@ -123,6 +268,8 @@ class SqliteRepository:
                 "due_date": due_date,
                 "recurrence": recurrence,
                 "notes": notes,
+                "priority": priority,
+                "rotate": rotate,
             }
         )
         with self._conn:  # one transaction; _insert_task must not commit itself
@@ -131,16 +278,7 @@ class SqliteRepository:
     def update_task(self, task_id: str, **fields: object) -> Task:
         cleaned = rules.validate_task_fields(fields)
         self._require_task(task_id)
-        if cleaned:
-            # Column names come from the validated allow-list, never from input.
-            assignments = ", ".join(f"{col} = ?" for col in cleaned)
-            values = [
-                v.isoformat() if isinstance(v, date) else v for v in cleaned.values()
-            ]
-            with self._conn:
-                self._conn.execute(
-                    f"UPDATE tasks SET {assignments} WHERE id = ?", (*values, task_id)
-                )
+        self._update("tasks", task_id, cleaned)
         return self._require_task(task_id)
 
     def complete_task(self, task_id: str) -> Task:
@@ -158,9 +296,13 @@ class SqliteRepository:
                     {
                         "title": task.title,
                         "notes": task.notes,
-                        "assignee": task.assignee,
+                        "assignee": (
+                            rules.swap_assignee(task.assignee) if task.rotate else task.assignee
+                        ),
                         "due_date": rules.next_due_date(task.due_date, task.recurrence),
                         "recurrence": task.recurrence,
+                        "priority": task.priority,
+                        "rotate": task.rotate,
                     }
                 )
         return self._require_task(task_id)
@@ -176,30 +318,41 @@ class SqliteRepository:
 
     def archive_task(self, task_id: str) -> None:
         self._require_task(task_id)
-        with self._conn:
-            self._conn.execute(
-                "UPDATE tasks SET archived_at = ? WHERE id = ?",
-                (rules.utc_now().isoformat(), task_id),
-            )
+        self._archive("tasks", task_id)
+
+    def list_archived_tasks(self, limit: int = DEFAULT_LIMIT) -> list[Task]:
+        rows = self._conn.execute(
+            f"SELECT {_TASK_COLUMNS} FROM tasks WHERE archived_at IS NOT NULL "
+            "ORDER BY archived_at DESC LIMIT ?",
+            (rules.clamp_limit(limit),),
+        ).fetchall()
+        return [_row_to_task(r) for r in rows]
+
+    def restore_task(self, task_id: str) -> Task:
+        self._restore("tasks", task_id, "task")
+        return self._require_task(task_id)
 
     # ---- grocery -----------------------------------------------------
-    def list_grocery(self) -> list[GroceryItem]:
+    def list_grocery(self, limit: int = DEFAULT_LIMIT) -> list[GroceryItem]:
         rows = self._conn.execute(
             f"SELECT {_GROCERY_COLUMNS} FROM grocery_items "
-            "WHERE archived_at IS NULL ORDER BY checked, created_at"
+            "WHERE archived_at IS NULL ORDER BY checked, created_at LIMIT ?",
+            (rules.clamp_limit(limit),),
         ).fetchall()
         return [_row_to_grocery(r) for r in rows]
 
-    def add_grocery(self, name: str, quantity: str = "") -> GroceryItem:
-        clean_name = rules.clean_text(name, "name", rules.MAX_GROCERY_NAME, required=True)
-        clean_qty = rules.clean_text(quantity, "quantity", rules.MAX_QUANTITY, required=False)
-        item_id = str(uuid.uuid4())
-        with self._conn:
-            self._conn.execute(
-                "INSERT INTO grocery_items (id, name, quantity, checked, added_by, created_at) "
-                "VALUES (?, ?, ?, 0, ?, ?)",
-                (item_id, clean_name, clean_qty, self._user_id, rules.utc_now().isoformat()),
-            )
+    def add_grocery(
+        self, name: str, quantity: str = "", category: GroceryCategory = "other"
+    ) -> GroceryItem:
+        cleaned = rules.validate_grocery_fields(
+            {"name": name, "quantity": quantity, "category": category}
+        )
+        return self._insert_grocery(cleaned)
+
+    def update_grocery(self, item_id: str, **fields: object) -> GroceryItem:
+        cleaned = rules.validate_grocery_fields(fields)
+        self._require_grocery(item_id)
+        self._update("grocery_items", item_id, cleaned)
         return self._require_grocery(item_id)
 
     def set_grocery_checked(self, item_id: str, checked: bool) -> GroceryItem:
@@ -220,13 +373,235 @@ class SqliteRepository:
             )
         return cur.rowcount
 
+    def list_archived_grocery(self, limit: int = DEFAULT_LIMIT) -> list[GroceryItem]:
+        rows = self._conn.execute(
+            f"SELECT {_GROCERY_COLUMNS} FROM grocery_items WHERE archived_at IS NOT NULL "
+            "ORDER BY archived_at DESC LIMIT ?",
+            (rules.clamp_limit(limit),),
+        ).fetchall()
+        return [_row_to_grocery(r) for r in rows]
+
+    def restore_grocery(self, item_id: str) -> GroceryItem:
+        self._restore("grocery_items", item_id, "grocery item")
+        return self._require_grocery(item_id)
+
+    def frequent_grocery(self, limit: int = 12) -> list[tuple[str, GroceryCategory]]:
+        rows = self._conn.execute(
+            "SELECT name, category FROM grocery_items "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 500"
+        ).fetchall()
+        pairs = [(r["name"], r["category"]) for r in rows]
+        return rules.frequent_names(pairs, limit)  # type: ignore[return-value]
+
+    # ---- meals -------------------------------------------------------
+    def list_meals(self, start: date, end: date, limit: int = DEFAULT_LIMIT) -> list[Meal]:
+        rows = self._conn.execute(
+            f"SELECT {_MEAL_COLUMNS} FROM meals WHERE archived_at IS NULL "
+            "AND day >= ? AND day <= ? ORDER BY day, created_at LIMIT ?",
+            (
+                rules.clean_required_date(start, "start").isoformat(),
+                rules.clean_required_date(end, "end").isoformat(),
+                rules.clamp_limit(limit),
+            ),
+        ).fetchall()
+        meals = [_row_to_meal(r) for r in rows]
+        return sorted(meals, key=lambda m: (m.day, rules.SLOT_ORDER[m.slot]))
+
+    def add_meal(
+        self, day: date, title: str, ingredients: str = "", slot: MealSlot = "dinner"
+    ) -> Meal:
+        cleaned = rules.validate_meal_fields(
+            {"day": day, "title": title, "ingredients": ingredients, "slot": slot}
+        )
+        meal_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO meals (id, day, slot, title, ingredients, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    meal_id,
+                    _db_value(cleaned["day"]),
+                    cleaned["slot"],
+                    cleaned["title"],
+                    cleaned["ingredients"],
+                    self._user_id,
+                    rules.utc_now().isoformat(),
+                ),
+            )
+        return self._require_meal(meal_id)
+
+    def update_meal(self, meal_id: str, **fields: object) -> Meal:
+        cleaned = rules.validate_meal_fields(fields)
+        self._require_meal(meal_id)
+        self._update("meals", meal_id, cleaned)
+        return self._require_meal(meal_id)
+
+    def archive_meal(self, meal_id: str) -> None:
+        self._require_meal(meal_id)
+        self._archive("meals", meal_id)
+
+    def meal_to_grocery(self, meal_id: str) -> int:
+        meal = self._require_meal(meal_id)
+        rows = self._conn.execute(
+            "SELECT name FROM grocery_items WHERE archived_at IS NULL"
+        ).fetchall()
+        seen = {r["name"].casefold() for r in rows}
+        added = 0
+        with self._conn:
+            for line in meal.ingredients.splitlines():
+                name = line.strip()
+                if not name or name.casefold() in seen:
+                    continue
+                seen.add(name.casefold())
+                self._insert_grocery({"name": name, "quantity": "", "category": "other"})
+                added += 1
+        return added
+
+    # ---- bills -------------------------------------------------------
+    def list_bills(self, limit: int = DEFAULT_LIMIT) -> list[Bill]:
+        rows = self._conn.execute(
+            f"SELECT {_BILL_COLUMNS} FROM bills WHERE archived_at IS NULL "
+            "ORDER BY due_date, name LIMIT ?",
+            (rules.clamp_limit(limit),),
+        ).fetchall()
+        return [_row_to_bill(r) for r in rows]
+
+    def add_bill(
+        self,
+        name: str,
+        amount_cents: int,
+        due_date: date,
+        recurrence: BillRecurrence = "monthly",
+    ) -> Bill:
+        cleaned = rules.validate_bill_fields(
+            {
+                "name": name,
+                "amount_cents": amount_cents,
+                "due_date": due_date,
+                "recurrence": recurrence,
+            }
+        )
+        bill_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO bills (id, name, amount_cents, due_date, recurrence, "
+                "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    bill_id,
+                    cleaned["name"],
+                    cleaned["amount_cents"],
+                    _db_value(cleaned["due_date"]),
+                    cleaned["recurrence"],
+                    self._user_id,
+                    rules.utc_now().isoformat(),
+                ),
+            )
+        return self._require_bill(bill_id)
+
+    def update_bill(self, bill_id: str, **fields: object) -> Bill:
+        cleaned = rules.validate_bill_fields(fields)
+        self._require_bill(bill_id)
+        self._update("bills", bill_id, cleaned)
+        return self._require_bill(bill_id)
+
+    def mark_bill_paid(self, bill_id: str) -> Bill:
+        bill = self._require_bill(bill_id)
+        today = clock.today()
+        new_due = rules.next_bill_due(bill.due_date, bill.recurrence, today)
+        self._update("bills", bill_id, {"last_paid_on": today, "due_date": new_due})
+        return self._require_bill(bill_id)
+
+    def archive_bill(self, bill_id: str) -> None:
+        self._require_bill(bill_id)
+        self._archive("bills", bill_id)
+
+    # ---- notes -------------------------------------------------------
+    def list_notes(self, limit: int = DEFAULT_LIMIT) -> list[Note]:
+        rows = self._conn.execute(
+            f"SELECT {_NOTE_COLUMNS} FROM notes WHERE archived_at IS NULL "
+            "ORDER BY pinned DESC, updated_at DESC LIMIT ?",
+            (rules.clamp_limit(limit),),
+        ).fetchall()
+        return [_row_to_note(r) for r in rows]
+
+    def add_note(self, title: str, body: str = "", pinned: bool = False) -> Note:
+        cleaned = rules.validate_note_fields({"title": title, "body": body, "pinned": pinned})
+        note_id = str(uuid.uuid4())
+        now = rules.utc_now().isoformat()
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO notes (id, title, body, pinned, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    note_id,
+                    cleaned["title"],
+                    cleaned["body"],
+                    1 if cleaned["pinned"] else 0,
+                    self._user_id,
+                    now,
+                    now,
+                ),
+            )
+        return self._require_note(note_id)
+
+    def update_note(self, note_id: str, **fields: object) -> Note:
+        cleaned = rules.validate_note_fields(fields)
+        self._require_note(note_id)
+        if cleaned:
+            self._update("notes", note_id, {**cleaned, "updated_at": rules.utc_now().isoformat()})
+        return self._require_note(note_id)
+
+    def archive_note(self, note_id: str) -> None:
+        self._require_note(note_id)
+        self._archive("notes", note_id)
+
+    # ---- storage meter -----------------------------------------------
+    def storage_usage(self) -> StorageUsage:
+        try:
+            if self._path is not None:
+                used = os.stat(self._path).st_size
+            else:  # :memory: has no file; estimate from allocated pages
+                pages = self._conn.execute("PRAGMA page_count").fetchone()[0]
+                size = self._conn.execute("PRAGMA page_size").fetchone()[0]
+                used = int(pages) * int(size)
+        except (OSError, sqlite3.Error) as exc:
+            logger.exception("could not measure sqlite size")
+            raise BackendError("could not measure storage") from exc
+        return StorageUsage(used_bytes=used, limit_bytes=STORAGE_LIMIT_BYTES)
+
     # ---- helpers -----------------------------------------------------
+    def _update(self, table: str, row_id: str, values: dict[str, object]) -> None:
+        """`table` is a module-internal constant; column names come from the
+        validated allow-lists, never from caller input."""
+        if not values:
+            return
+        assignments = ", ".join(f"{col} = ?" for col in values)
+        params = [_db_value(v) for v in values.values()]
+        with self._conn:
+            self._conn.execute(
+                f"UPDATE {table} SET {assignments} WHERE id = ?", (*params, row_id)
+            )
+
+    def _archive(self, table: str, row_id: str) -> None:
+        self._update(table, row_id, {"archived_at": rules.utc_now().isoformat()})
+
+    def _restore(self, table: str, row_id: str, label: str) -> None:
+        with self._conn:
+            cur = self._conn.execute(
+                f"UPDATE {table} SET archived_at = NULL "
+                "WHERE id = ? AND archived_at IS NOT NULL",
+                (row_id,),
+            )
+        if cur.rowcount == 0:
+            raise NotFoundError(f"archived {label} {row_id} not found")
+
     def _insert_task(self, values: dict[str, object]) -> Task:
         task_id = str(uuid.uuid4())
         due = values.get("due_date")
         self._conn.execute(
             "INSERT INTO tasks (id, title, notes, assignee, due_date, recurrence, "
-            "status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+            "status, created_by, created_at, priority, rotate) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
             (
                 task_id,
                 values["title"],
@@ -236,25 +611,61 @@ class SqliteRepository:
                 values.get("recurrence", "none"),
                 self._user_id,
                 rules.utc_now().isoformat(),
+                values.get("priority", "normal"),
+                1 if values.get("rotate") else 0,
             ),
         )
         return self._require_task(task_id)
 
+    def _insert_grocery(self, values: dict[str, object]) -> GroceryItem:
+        item_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO grocery_items (id, name, quantity, checked, added_by, "
+                "created_at, category) VALUES (?, ?, ?, 0, ?, ?, ?)",
+                (
+                    item_id,
+                    values["name"],
+                    values.get("quantity", ""),
+                    self._user_id,
+                    rules.utc_now().isoformat(),
+                    values.get("category", "other"),
+                ),
+            )
+        return self._require_grocery(item_id)
+
     def _require_task(self, task_id: str) -> Task:
-        row = self._conn.execute(
-            f"SELECT {_TASK_COLUMNS} FROM tasks WHERE id = ? AND archived_at IS NULL",
-            (task_id,),
-        ).fetchone()
+        row = self._fetch("tasks", _TASK_COLUMNS, task_id)
         if row is None:
             raise NotFoundError(f"task {task_id} not found")
         return _row_to_task(row)
 
     def _require_grocery(self, item_id: str) -> GroceryItem:
-        row = self._conn.execute(
-            f"SELECT {_GROCERY_COLUMNS} FROM grocery_items "
-            "WHERE id = ? AND archived_at IS NULL",
-            (item_id,),
-        ).fetchone()
+        row = self._fetch("grocery_items", _GROCERY_COLUMNS, item_id)
         if row is None:
             raise NotFoundError(f"grocery item {item_id} not found")
         return _row_to_grocery(row)
+
+    def _require_meal(self, meal_id: str) -> Meal:
+        row = self._fetch("meals", _MEAL_COLUMNS, meal_id)
+        if row is None:
+            raise NotFoundError(f"meal {meal_id} not found")
+        return _row_to_meal(row)
+
+    def _require_bill(self, bill_id: str) -> Bill:
+        row = self._fetch("bills", _BILL_COLUMNS, bill_id)
+        if row is None:
+            raise NotFoundError(f"bill {bill_id} not found")
+        return _row_to_bill(row)
+
+    def _require_note(self, note_id: str) -> Note:
+        row = self._fetch("notes", _NOTE_COLUMNS, note_id)
+        if row is None:
+            raise NotFoundError(f"note {note_id} not found")
+        return _row_to_note(row)
+
+    def _fetch(self, table: str, columns: str, row_id: str) -> sqlite3.Row | None:
+        return self._conn.execute(
+            f"SELECT {columns} FROM {table} WHERE id = ? AND archived_at IS NULL",
+            (row_id,),
+        ).fetchone()

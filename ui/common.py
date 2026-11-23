@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import streamlit as st
@@ -33,6 +33,8 @@ def show_flash() -> None:
     for kind, message in st.session_state.pop(FLASH_KEY, []):
         if kind == "error":
             st.error(message)
+        elif kind == "toast":
+            st.toast(message)
         else:
             st.success(message)
 
@@ -70,7 +72,9 @@ def task_checkbox(repo: Repository, task: Task, prefix: str) -> None:
     key = f"{prefix}_chk_{task.id}"
     due = f" - due {task.due_date:%a %d %b}" if task.due_date else ""
     repeat = f" (repeats {task.recurrence})" if task.recurrence != "none" else ""
-    label = f"{task.title}{due}{repeat}"
+    mark = ":red[**HIGH**] " if task.priority == "high" else ""
+    low = " (low)" if task.priority == "low" else ""
+    label = f"{mark}{task.title}{due}{repeat}{low}"
     st.checkbox(
         label,
         value=task.status == "done",
@@ -87,3 +91,21 @@ def today() -> date:
     except ValidationError as exc:
         st.error(f"Server configuration problem: APP_TZ is invalid ({exc}).")
         st.stop()
+
+
+def now_local() -> datetime:
+    """Current time in APP_TZ (stops the page with a clear error if APP_TZ is invalid)."""
+    try:
+        return datetime.now(clock.get_zone(state.secret("APP_TZ") or None))
+    except ValidationError as exc:
+        st.error(f"Server configuration problem: APP_TZ is invalid ({exc}).")
+        st.stop()
+
+
+def run_value(action: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Like run() but returns the action's result, or None after queueing an error."""
+    try:
+        return action(*args, **kwargs)
+    except RepositoryError as exc:
+        flash(friendly(exc))
+        return None

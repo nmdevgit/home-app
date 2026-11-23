@@ -4,7 +4,17 @@ from __future__ import annotations
 import streamlit as st
 
 from ui import state
-from views import dashboard, grocery, login, tasks
+from views import (
+    archive,
+    bills,
+    dashboard,
+    grocery,
+    login,
+    meals,
+    notes,
+    settings,
+    tasks,
+)
 
 
 def _logout() -> None:
@@ -33,13 +43,25 @@ def main() -> None:
         st.navigation([st.Page(login.render, title="Sign in", url_path="login")]).run()
         return
     _sidebar_account()
-    pages = [
+    core_pages = [
         st.Page(dashboard.render, title="Today", icon=":material/today:",
                 url_path="today", default=True),
         st.Page(tasks.render, title="Tasks", icon=":material/checklist:", url_path="tasks"),
         st.Page(grocery.render, title="Grocery", icon=":material/shopping_cart:",
                 url_path="grocery"),
     ]
+    plan_pages = [
+        st.Page(meals.render, title="Meals", icon=":material/restaurant:", url_path="meals"),
+        st.Page(bills.render, title="Bills", icon=":material/receipt_long:", url_path="bills"),
+        st.Page(notes.render, title="Notes", icon=":material/sticky_note_2:", url_path="notes"),
+    ]
+    more_pages = [
+        st.Page(archive.render, title="Archive", icon=":material/inventory_2:",
+                url_path="archive"),
+        st.Page(settings.render, title="Settings", icon=":material/settings:",
+                url_path="settings"),
+    ]
+    pages = {"": core_pages, "Plan": plan_pages, "More": more_pages}
     st.navigation(pages).run()
 
 
