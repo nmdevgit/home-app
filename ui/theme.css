@@ -324,3 +324,33 @@ html, body, .stApp, [data-testid="stAppViewContainer"] { height: 100%; }
     display: none !important;
   }
 }
+
+/* PHONE NAV RAIL: on narrow screens the nav is a slim vertical bar on the RIGHT edge,
+   vertically centred. This keeps the whole bottom (and the Streamlit Cloud badge in the
+   bottom-right corner, which we cannot restyle) free of overlaps. Desktop keeps the bottom bar. */
+@media (max-width: 760px) {
+  [class*="st-key-tabbar"] {
+    left: auto !important; right: max(0.3rem, env(safe-area-inset-right)) !important;
+    bottom: auto !important; top: 50% !important; transform: translateY(-50%);
+    width: 3.5rem !important; max-width: 3.5rem !important; margin: 0 !important;
+    padding: 0.3rem 0.15rem !important; border: 1px solid var(--hh-line); border-radius: 20px !important;
+    box-shadow: 0 8px 26px -10px rgba(15, 50, 45, 0.55); max-height: 92vh; overflow-y: auto;
+  }
+  [class*="st-key-tabbar"] [data-testid="stHorizontalBlock"] { flex-direction: column !important; gap: 0.2rem; }
+  [class*="st-key-tabbar"] [data-testid="stColumn"] { flex: 0 0 auto !important; width: 100% !important; }
+  [class*="st-key-tabbar"] a { min-height: 2.9rem; padding: 0.15rem 0; }
+  [class*="st-key-tabbar"] a p { font-size: 0.6rem; }
+  [class*="st-key-tabbar"] [data-testid^="stBaseButton"] { margin: 0.1rem auto; width: 2.8rem; height: 2.8rem; min-height: 2.8rem; }
+  /* leave room for the rail on the right, and generous bottom clearance */
+  .block-container {
+    padding-right: calc(4.3rem + env(safe-area-inset-right)) !important;
+    padding-left: max(0.8rem, env(safe-area-inset-left)) !important;
+    padding-bottom: calc(6.5rem + env(safe-area-inset-bottom)) !important;
+  }
+  /* grocery cart total: bottom left, stopping short of the bottom-right badge corner */
+  [class*="st-key-cartbar"] {
+    left: 0.6rem !important; right: 5.4rem !important; margin: 0 !important; width: auto !important;
+    bottom: calc(0.9rem + env(safe-area-inset-bottom)) !important;
+  }
+  [class*="st-key-undo_bar"] { right: 4.5rem !important; left: 0.6rem !important; width: auto !important; margin: 0 !important; }
+}
