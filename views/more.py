@@ -35,3 +35,4 @@ def render() -> None:
             with col, st.container(key=f"card_more_{path}"):
                 st.page_link(pages[path], label=title, icon=icon, width="stretch")
     st.button("Log out", on_click=_logout, width="stretch", key="more_logout")
+    st.caption(f"App version {nav.APP_VERSION}")

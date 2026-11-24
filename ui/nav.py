@@ -26,6 +26,7 @@ PAGES: tuple[tuple[str, str, str, str, str], ...] = (
 
 
 PAGES_KEY = "_nav_pages"
+APP_VERSION = "r4.5-right-rail"  # shown on the More page so you can tell which build is live
 
 
 def url_paths() -> list[str]:

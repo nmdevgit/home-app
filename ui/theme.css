@@ -328,7 +328,8 @@ html, body, .stApp, [data-testid="stAppViewContainer"] { height: 100%; }
 /* PHONE NAV RAIL: on narrow screens the nav is a slim vertical bar on the RIGHT edge,
    vertically centred. This keeps the whole bottom (and the Streamlit Cloud badge in the
    bottom-right corner, which we cannot restyle) free of overlaps. Desktop keeps the bottom bar. */
-@media (max-width: 760px) {
+/* narrow screens OR any touch-only device (also covers "Desktop site" mode and landscape) */
+@media (max-width: 760px), (hover: none) and (pointer: coarse) {
   [class*="st-key-tabbar"] {
     left: auto !important; right: max(0.3rem, env(safe-area-inset-right)) !important;
     bottom: auto !important; top: 50% !important; transform: translateY(-50%);
