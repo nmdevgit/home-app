@@ -194,8 +194,9 @@ input, textarea, [data-baseweb="select"] > div { border-radius: 12px !important;
 /* ---- Phone-first compact layer (overrides above; laptop stays centred at 40rem) ---- */
 :root { --hh-gap: 0.4rem; --hh-tabbar: 3.6rem; }
 [data-testid="stSidebar"], [data-testid="stExpandSidebarButton"], [data-testid="stSidebarCollapsedControl"] { display: none !important; }
-[data-testid="stHeader"] { height: 0; min-height: 0; background: transparent; }
-.block-container { padding-top: 0.5rem; padding-bottom: calc(var(--hh-tabbar) + 1.5rem + env(safe-area-inset-bottom)); }
+/* Keep Streamlit's top bar (Share, GitHub, menu) visible, but slim. */
+[data-testid="stHeader"] { height: 2.75rem; min-height: 2.75rem; background: var(--hh-bg); z-index: 990; }
+.block-container { padding-top: 3.25rem; padding-bottom: calc(var(--hh-tabbar) + 1.5rem + env(safe-area-inset-bottom)); }
 h1 { font-size: 1.3rem; }
 h2 { font-size: 1.1rem; } h3 { font-size: 1rem; }
 #root .stApp h1, .stApp [data-testid="stHeading"] h1 { font-size: 1.35rem !important; line-height: 1.25; padding: 0.35rem 0 0.45rem; margin: 0; overflow: visible; }
@@ -273,7 +274,7 @@ h2 { font-size: 1.1rem; } h3 { font-size: 1rem; }
 .hh-line { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; font-size: 0.88rem; min-width: 0; }
 .hh-line b { font-weight: 650; }
 .hh-day { font-size: 0.78rem; font-weight: 700; opacity: 0.7; margin: 0.6rem 0 0.1rem; text-transform: uppercase; letter-spacing: 0.04em; }
-[class*="st-key-undo_bar"] { position: fixed; top: 0.4rem; left: 0; right: 0; margin: 0 auto; width: calc(100% - 1.4rem); max-width: 38rem; z-index: 1000;
+[class*="st-key-undo_bar"] { position: fixed; top: 3.1rem; left: 0; right: 0; margin: 0 auto; width: calc(100% - 1.4rem); max-width: 38rem; z-index: 1000;
   background: var(--hh-surface); border: 1px solid var(--hh-line); border-radius: 14px; padding: 0.3rem 0.6rem;
   box-shadow: 0 8px 22px -12px rgba(0, 0, 0, 0.5); }
 @media (min-width: 900px) { [class*="st-key-tabbar"] { border-radius: 18px 18px 0 0; } }
