@@ -313,3 +313,14 @@ html, body, .stApp, [data-testid="stAppViewContainer"] { height: 100%; }
   padding-bottom: calc(var(--hh-tabbar) + 6.5rem + env(safe-area-inset-bottom)) !important;
 }
 .block-container::after { content: ""; display: block; height: 3rem; }
+
+/* Streamlit Community Cloud floats a "creator / hosted with Streamlit" badge (GitHub avatar +
+   red logo) at the bottom right. On phones it sits on top of our tab bar ("More") and the
+   grocery cart bar, so hide it on small screens only (the top bar keeps Share / GitHub / menu).
+   Class names are hashed with stable prefixes, hence the attribute selectors. */
+@media (max-width: 760px) {
+  [class*="viewerBadge"], [class*="_profileContainer_"], [class*="_profilePreview_"],
+  [data-testid="appCreatorAvatar"], a[href*="streamlit.io/cloud"][class*="badge" i] {
+    display: none !important;
+  }
+}
