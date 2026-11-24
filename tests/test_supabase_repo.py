@@ -26,6 +26,43 @@ def _stamp() -> str:
     return f"2025-01-01T00:00:00.{next(_CLOCK):06d}Z"
 
 
+def _parse_or(expr: str) -> list[tuple[str, str, str]]:
+    """Split 'col.op.value,col.op."quoted,value"' the way PostgREST does."""
+    parts: list[str] = []
+    cur, quoted = "", False
+    for ch in expr:
+        if ch == '"':
+            quoted = not quoted
+        elif ch == "," and not quoted:
+            parts.append(cur)
+            cur = ""
+            continue
+        else:
+            cur += ch
+    parts.append(cur)
+    out = []
+    for part in parts:
+        col, op, val = part.split(".", 2)
+        out.append((col, op, val))
+    return out
+
+
+def _like_match(text: str, pattern: str) -> bool:
+    core = pattern.strip("%*").lower()
+    return core in text.lower()
+
+
+def _cond(row: dict[str, Any], col: str, op: str, val: str) -> bool:
+    got = row.get(col)
+    if op == "ilike":
+        return _like_match(str(got or ""), val)
+    if op == "neq":
+        return got != val
+    if op == "gte":
+        return got is not None and got >= val
+    return got == val
+
+
 class FakeQuery:
     def __init__(self, store: list[dict[str, Any]], op: str, payload: Any = None) -> None:
         self.store, self.op, self.payload = store, op, payload
@@ -34,6 +71,8 @@ class FakeQuery:
         self.max_rows: int | None = None
         self._negate = False
         self.window: tuple[int, int] | None = None
+        self.ilike_log: list[tuple[str, str]] = []
+        self.or_log: list[str] = []
 
     @property
     def not_(self) -> FakeQuery:
@@ -63,6 +102,14 @@ class FakeQuery:
     def in_(self, col: str, vals: list[Any]) -> FakeQuery:
         return self._add("in", col, list(vals))
 
+    def ilike(self, col: str, pattern: str) -> FakeQuery:
+        self.ilike_log.append((col, pattern))
+        return self._add("ilike", col, pattern)
+
+    def or_(self, expr: str) -> FakeQuery:
+        self.or_log.append(expr)
+        return self._add("or", "", _parse_or(expr))
+
     def range(self, start: int, end: int) -> FakeQuery:
         self.window = (start, end)
         return self
@@ -78,7 +125,11 @@ class FakeQuery:
     def _match(self, row: dict[str, Any]) -> bool:
         for kind, col, val, negate in self.filters:
             got = row.get(col)
-            if kind == "eq":
+            if kind == "or":
+                ok = any(_cond(row, c, op, v) for c, op, v in val)
+            elif kind == "ilike":
+                ok = _like_match(str(got or ""), val)
+            elif kind == "eq":
                 ok = got == val
             elif kind == "is":
                 ok = got is None  # only 'null' is used
@@ -122,6 +173,12 @@ class FakeQuery:
                     "items": "",
                     "split": "equal",
                     "kind": "expense",
+                    "who": "both",
+                    "recurrence": "none",
+                    "remind_days": 0,
+                    "start_time": None,
+                    "icon": "savings",
+                    "note": "",
                     **item,
                 }
                 self.store.append(row)
@@ -142,6 +199,9 @@ class FakeQuery:
                 r.update(self.payload)
                 if "updated_at" in r:  # mimics the notes trigger
                     r["updated_at"] = _stamp()
+        if self.op == "delete":
+            for r in rows:
+                self.store.remove(r)
         return FakeResponse([dict(r) for r in rows])
 
 
@@ -161,9 +221,9 @@ class FakeTable:
         self.log.append((self.name, "update"))
         return FakeQuery(self.store, "update", payload)
 
-    def delete(self) -> None:  # the repo must never call this
+    def delete(self) -> FakeQuery:
         self.log.append((self.name, "delete"))
-        raise AssertionError("delete called")
+        return FakeQuery(self.store, "delete")
 
 
 class FakeRpc:
@@ -180,6 +240,7 @@ class FakeClient:
             name: [] for name in (
                 "tasks", "grocery_items", "meals", "bills", "notes",
                 "subtasks", "expenses", "templates", "household_members",
+                "events", "goals", "goal_moves", "user_prefs",
             )
         }
         self.log: list[tuple[str, str]] = []
@@ -246,7 +307,7 @@ def test_archive_hides_task(repo: SupabaseRepository, client: FakeClient) -> Non
         repo.archive_task(task.id)
 
 
-def test_grocery_flow_and_no_delete(repo: SupabaseRepository, client: FakeClient) -> None:
+def test_grocery_flow_archives_not_deletes(repo: SupabaseRepository, client: FakeClient) -> None:
     item = repo.add_grocery("Milk", "2L")
     assert client.stores["grocery_items"][0]["added_by"] == "nick-id"
     assert repo.set_grocery_checked(item.id, True).checked

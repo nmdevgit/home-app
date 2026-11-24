@@ -8,7 +8,7 @@ import streamlit as st
 
 from core.repo import Repository, Subtask, Task
 from ui import theme
-from ui.common import LABELS, RECURRENCES, load, run
+from ui.common import LABELS, RECURRENCES, archive_item, confirm_delete, load, run, set_undo
 
 ASSIGNEES = ("either", "nick", "natalie")
 PRIORITIES = ("high", "normal", "low")
@@ -29,7 +29,8 @@ def load_subtasks(repo: Repository, tasks: list[Task]) -> dict[str, list[Subtask
 
 def _toggle_task(repo: Repository, task: Task, key: str) -> None:
     if st.session_state.get(key):
-        run(repo.complete_task, task.id)
+        if run(repo.complete_task, task.id):
+            set_undo("complete", task.id, task.title)
     else:
         run(repo.reopen_task, task.id)
 
@@ -38,8 +39,16 @@ def _toggle_sub(repo: Repository, sub: Subtask, key: str) -> None:
     run(repo.set_subtask_done, sub.id, bool(st.session_state.get(key)))
 
 
-def _archive_sub(repo: Repository, sub_id: str) -> None:
-    run(repo.archive_subtask, sub_id, ok="Step archived.")
+def _archive_sub(repo: Repository, sub_id: str, title: str = "step") -> None:
+    archive_item("subtask", repo.archive_subtask, sub_id, title, "Step archived.")
+
+
+def _delete_sub_ask(sub_id: str) -> None:
+    st.session_state[f"subdel_{sub_id}"] = True
+
+
+def _delete_sub(repo: Repository, sub_id: str) -> None:
+    run(repo.delete_subtask, sub_id, ok="Step deleted.")
 
 
 def _add_sub(repo: Repository, task_id: str) -> None:
@@ -88,31 +97,47 @@ def _do_save(repo: Repository, task_id: str) -> None:
 
 
 def _archive(repo: Repository, task_id: str) -> None:
-    run(repo.archive_task, task_id, ok="Task archived.")
+    if run(repo.archive_task, task_id, ok="Task archived."):
+        set_undo("archive", task_id, "task")
 
 
 def _edit_form(repo: Repository, task: Task) -> None:
     widgets(f"te_{task.id}", task)
-    st.button("Save changes", type="primary", use_container_width=True, key=f"te_{task.id}_save",
+    st.button("Save changes", type="primary", width="stretch", key=f"te_{task.id}_save",
               on_click=_do_save, args=(repo, task.id))
-    with st.popover("Archive", icon=":material/inventory_2:", use_container_width=True):
-        st.write("Archive this task? It is hidden from lists but kept.")
+    with st.popover("Archive", icon=":material/inventory_2:", width="stretch"):
+        st.write("Archive this task? It moves to Archived at the bottom of Tasks "
+                 "and you can restore it any time.")
         st.button("Yes, archive", key=f"arch_{task.id}", on_click=_archive,
-                  args=(repo, task.id), use_container_width=True)
+                  args=(repo, task.id), width="stretch")
+    confirm_delete(f"task_{task.id}", repo.delete_task, task.id,
+                   what="this task and its steps", ok="Task deleted.")
 
 
 def _subtasks(repo: Repository, task: Task, subs: list[Subtask]) -> None:
     for sub in subs:
         key = f"sub_{sub.id}"
-        left, right = st.columns([5, 1], vertical_alignment="center")
-        left.checkbox(sub.title, value=sub.done, key=key, on_change=_toggle_sub,
-                      args=(repo, sub, key))
-        right.button("", icon=":material/archive:", key=f"{key}_x", help="Archive step",
-                     on_click=_archive_sub, args=(repo, sub.id))
+        with st.container(key=f"subrow_{sub.id}"):
+            left, right = st.columns([5, 1], vertical_alignment="center")
+            left.checkbox(sub.title, value=sub.done, key=key, on_change=_toggle_sub,
+                          args=(repo, sub, key))
+            with right.popover("", icon=":material/more_vert:", help="Step options"):
+                st.button("Archive step", icon=":material/archive:", key=f"{key}_x",
+                          on_click=_archive_sub, args=(repo, sub.id, sub.title), width="stretch")
+                if st.session_state.get(f"subdel_{sub.id}"):
+                    st.markdown("**Delete forever?**")
+                    with st.container(key=f"del_sub_{sub.id}"):
+                        st.button("Yes, delete forever", key=f"{key}_dy",
+                                  on_click=_delete_sub, args=(repo, sub.id),
+                                  width="stretch")
+                else:
+                    st.button("Delete step", icon=":material/delete:", key=f"{key}_d",
+                              on_click=_delete_sub_ask, args=(sub.id,),
+                              width="stretch")
     with st.form(f"sf_{task.id}", clear_on_submit=True, border=False):
         st.text_input("New step", key=f"sn_{task.id}", placeholder="Add a step",
                       label_visibility="collapsed")
-        st.form_submit_button("Add step", icon=":material/add:", use_container_width=True,
+        st.form_submit_button("Add step", icon=":material/add:", width="stretch",
                               on_click=_add_sub, args=(repo, task.id))
 
 
@@ -145,7 +170,7 @@ def task_card(
         )
         if not details:
             return
-        with st.expander("Steps and details"):
+        with st.expander("Steps, edit, delete", icon=":material/more_horiz:"):
             if task.notes:
                 st.write(task.notes)
             _subtasks(repo, task, subs)

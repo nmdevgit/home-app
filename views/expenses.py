@@ -8,7 +8,7 @@ import streamlit as st
 from core.repo import Expense, Repository
 from core.rules import expense_balance_cents
 from ui import state, theme
-from ui.common import LABELS, flash, load, run, show_flash, today
+from ui.common import LABELS, archive_item, confirm_delete, flash, load, run, show_flash, today
 from ui.grouping import partner_of
 from ui.money import format_cents, parse_cents
 
@@ -54,8 +54,8 @@ def _settle(repo: Repository, balance: int) -> None:
         ok="Settled up. Balance is now zero.")
 
 
-def _archive(repo: Repository, expense_id: str) -> None:
-    run(repo.archive_expense, expense_id, ok="Entry archived.")
+def _archive(repo: Repository, expense_id: str, title: str) -> None:
+    archive_item("expense", repo.archive_expense, expense_id, title, "Entry archived.")
 
 
 def _balance_card(repo: Repository, expenses: list[Expense]) -> None:
@@ -69,7 +69,7 @@ def _balance_card(repo: Repository, expenses: list[Expense]) -> None:
         if balance != 0:
             st.button("Settle up", type="primary", icon=":material/handshake:",
                       key="x_settle", on_click=_settle, args=(repo, balance),
-                      use_container_width=True)
+                      width="stretch")
 
 
 def _add_form(repo: Repository, me: str) -> None:
@@ -80,7 +80,7 @@ def _add_form(repo: Repository, me: str) -> None:
                      key="x_payer")
         st.selectbox("How is it split?", list(SPLITS), format_func=SPLITS.get, key="x_split")
         st.date_input("Day", value=today(), format="YYYY-MM-DD", key="x_day")
-        st.button("Add expense", type="primary", use_container_width=True, on_click=_add,
+        st.button("Add expense", type="primary", width="stretch", on_click=_add,
                   args=(repo,), key="x_add")
 
 
@@ -93,10 +93,12 @@ def _entry(repo: Repository, exp: Expense) -> None:
         theme.pills(theme.person_badge(exp.paid_by), theme.badge(paid),
                     theme.badge(f"{exp.day:%d %b}"),
                     theme.badge(SPLITS[exp.split], "neutral") if exp.kind == "expense" else "")
-        with st.popover("Archive", icon=":material/inventory_2:", use_container_width=True):
-            st.write("Archive this entry? The balance updates and the entry is kept.")
+        with st.popover("Archive", icon=":material/inventory_2:", width="stretch"):
+            st.write("Archive this entry? The balance updates and you can restore it any time.")
             st.button("Yes, archive", key=f"xa_{exp.id}", on_click=_archive,
-                      args=(repo, exp.id), use_container_width=True)
+                      args=(repo, exp.id, title), width="stretch")
+        confirm_delete(f"exp_{exp.id}", repo.delete_expense, exp.id, what="this entry",
+                       ok="Entry deleted.")
 
 
 def render() -> None:

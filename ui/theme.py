@@ -19,9 +19,37 @@ TONES = frozenset({"neutral", "ok", "warn", "bad", "nick", "natalie", "either", 
 CSS = "<style>" + (Path(__file__).with_name("theme.css")).read_text(encoding="utf-8") + "</style>"
 
 
-def inject() -> None:
-    """Inject the fixed CSS block once per page render."""
-    st.markdown(CSS, unsafe_allow_html=True)
+# Accent presets: fixed constants. The pref value only SELECTS a key; it is never interpolated.
+_PRESETS = {  # name: (accent, darker accent, "r,g,b" for the soft tint)
+    "indigo": ("#4c6ef5", "#364fc7", "76,110,245"),
+    "rose": ("#d6336c", "#a61e4d", "214,51,108"),
+    "amber": ("#e67700", "#b35c00", "230,119,0"),
+    "violet": ("#7048e8", "#5f3dc4", "112,72,232"),
+}
+ACCENTS: dict[str, str] = {"teal": ""} | {
+    name: f":root{{--hh-accent:{c1};--hh-accent-2:{c2};--hh-accent-soft:rgba({rgb},.14);}}"
+    for name, (c1, c2, rgb) in _PRESETS.items()
+}
+_ACCENT_BUTTONS = (
+    '[data-testid="stBaseButton-primary"]{background:var(--hh-accent);'
+    "background:linear-gradient(135deg,var(--hh-accent),var(--hh-accent-2));}"
+    ".hh-hero{background:var(--hh-accent-2);}"
+)
+COMPACT_CSS = (
+    '[class*="st-key-card_"]{padding:.35rem .5rem;}'
+    '[data-testid="stCheckbox"] label{min-height:2.75rem;}'
+    '[data-testid="stVerticalBlock"]{gap:.25rem;}'
+)
+
+
+def inject(accent: str = "teal", compact: bool = False) -> None:
+    """Inject the fixed CSS once per page render, plus a validated accent preset."""
+    extra = ACCENTS.get(accent, "")
+    if extra:
+        extra += _ACCENT_BUTTONS
+    if compact:
+        extra += COMPACT_CSS
+    st.markdown(CSS + (f"<style>{extra}</style>" if extra else ""), unsafe_allow_html=True)
 
 
 def esc(text: object) -> str:
@@ -103,6 +131,38 @@ def hero(greeting: str, date_text: str, done: int, total: int) -> None:
         f'<div class="hh-date">{esc(date_text)}</div>'
         f'<div class="hh-prog">{esc(line)}</div>'
         f'<div class="hh-track"><div class="hh-fill" style="width:{pct}%"></div></div></div>'
+    )
+
+
+def tiles(items: list[tuple[str, str, str]]) -> None:
+    """Row of stat tiles: (value, label, tone). Values are escaped."""
+    body = "".join(
+        f'<div class="hh-tile hh-t-{_tone(tone)}"><b>{esc(value)}</b>'
+        f"<span>{esc(label)}</span></div>"
+        for value, label, tone in items
+    )
+    html_block(f'<div class="hh-tiles">{body}</div>')
+
+
+def bar(percent: float) -> str:
+    """Progress bar markup (pure number, clamped 0..100)."""
+    pct = int(max(0, min(100, percent)))
+    return f'<div class="hh-bar"><i style="width:{pct}%"></i></div>'
+
+
+def hero2(greeting: str, date_text: str, done: int, total: int, person: str,
+          stats: list[str]) -> None:
+    """Person-coloured greeting card with progress and a row of mini stats."""
+    pct = int(100 * done / total) if total else 100
+    line = f"{int(done)} of {int(total)} done today" if total else "Nothing due today"
+    key = person if person in PERSON_NAMES else "either"
+    chips = "".join(f"<span>{esc(x)}</span>" for x in stats if x)
+    html_block(
+        f'<div class="hh-hero hh-p-{key}"><div class="hh-hi">{esc(greeting)}</div>'
+        f'<div class="hh-date">{esc(date_text)}</div>'
+        f'<div class="hh-prog">{esc(line)}</div>'
+        f'<div class="hh-track"><div class="hh-fill" style="width:{pct}%"></div></div>'
+        f'<div class="hh-herostats">{chips}</div></div>'
     )
 
 

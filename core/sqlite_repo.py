@@ -11,27 +11,39 @@ import logging
 import os
 import sqlite3
 import uuid
-from datetime import UTC, date, datetime
+from collections.abc import Callable, Iterable
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 from core import clock, rules
 from core.errors import BackendError, NotFoundError, ValidationError
 from core.repo import (
     DEFAULT_LIMIT,
+    Activity,
+    ArchivedItem,
+    ArchivedKind,
     Assignee,
     Bill,
     BillRecurrence,
+    EventItem,
+    EventOccurrence,
+    EventRecurrence,
+    EventWho,
     Expense,
     ExpenseKind,
     ExpenseSplit,
+    Goal,
+    GoalMove,
     GroceryCategory,
     GroceryItem,
     Meal,
     MealSlot,
     Note,
     Person,
+    Prefs,
     Priority,
     Recurrence,
+    SearchHit,
     StorageUsage,
     Subtask,
     Task,
@@ -66,7 +78,9 @@ CREATE TABLE IF NOT EXISTS grocery_items (
     added_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     archived_at TEXT,
-    category TEXT NOT NULL DEFAULT 'other'
+    category TEXT NOT NULL DEFAULT 'other',
+    price_cents INTEGER
+        CHECK (price_cents IS NULL OR (price_cents >= 0 AND price_cents <= 100000000))
 );
 CREATE TABLE IF NOT EXISTS meals (
     id TEXT PRIMARY KEY,
@@ -129,6 +143,49 @@ CREATE TABLE IF NOT EXISTS templates (
     created_at TEXT NOT NULL,
     archived_at TEXT
 );
+CREATE TABLE IF NOT EXISTS user_prefs (
+    user_id TEXT PRIMARY KEY,
+    accent TEXT NOT NULL DEFAULT 'teal',
+    pinned TEXT NOT NULL DEFAULT '',
+    start_page TEXT NOT NULL DEFAULT 'today',
+    compact INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    day TEXT NOT NULL,
+    start_time TEXT,
+    who TEXT NOT NULL DEFAULT 'both',
+    notes TEXT NOT NULL DEFAULT '',
+    recurrence TEXT NOT NULL DEFAULT 'none',
+    remind_days INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+);
+CREATE TABLE IF NOT EXISTS goals (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    target_cents INTEGER NOT NULL,
+    due_date TEXT,
+    icon TEXT NOT NULL DEFAULT 'savings',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    archived_at TEXT
+);
+CREATE TABLE IF NOT EXISTS goal_moves (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    person TEXT NOT NULL,
+    day TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_day ON events (day);
+CREATE INDEX IF NOT EXISTS idx_goal_moves_goal ON goal_moves (goal_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks (task_id, archived_at);
 CREATE INDEX IF NOT EXISTS idx_expenses_day ON expenses (day);
 CREATE INDEX IF NOT EXISTS idx_meals_day ON meals (day);
@@ -138,22 +195,14 @@ CREATE INDEX IF NOT EXISTS idx_tasks_completed ON tasks (completed_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status, archived_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks (due_date);
 CREATE INDEX IF NOT EXISTS idx_grocery_active ON grocery_items (archived_at, checked);
-CREATE TRIGGER IF NOT EXISTS tasks_no_delete BEFORE DELETE ON tasks
-BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
-CREATE TRIGGER IF NOT EXISTS grocery_no_delete BEFORE DELETE ON grocery_items
-BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
-CREATE TRIGGER IF NOT EXISTS meals_no_delete BEFORE DELETE ON meals
-BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
-CREATE TRIGGER IF NOT EXISTS bills_no_delete BEFORE DELETE ON bills
-BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
-CREATE TRIGGER IF NOT EXISTS notes_no_delete BEFORE DELETE ON notes
-BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
-CREATE TRIGGER IF NOT EXISTS subtasks_no_delete BEFORE DELETE ON subtasks
-BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
-CREATE TRIGGER IF NOT EXISTS expenses_no_delete BEFORE DELETE ON expenses
-BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
-CREATE TRIGGER IF NOT EXISTS templates_no_delete BEFORE DELETE ON templates
-BEGIN SELECT RAISE(ABORT, 'deleting rows is not allowed; set archived_at'); END;
+DROP TRIGGER IF EXISTS tasks_no_delete;
+DROP TRIGGER IF EXISTS grocery_no_delete;
+DROP TRIGGER IF EXISTS meals_no_delete;
+DROP TRIGGER IF EXISTS bills_no_delete;
+DROP TRIGGER IF EXISTS notes_no_delete;
+DROP TRIGGER IF EXISTS subtasks_no_delete;
+DROP TRIGGER IF EXISTS expenses_no_delete;
+DROP TRIGGER IF EXISTS templates_no_delete;
 """
 
 # Columns added after v1; older dev database files get them via ALTER TABLE.
@@ -162,6 +211,11 @@ _ADDED_COLUMNS = (
     ("tasks", "rotate", "INTEGER NOT NULL DEFAULT 0"),
     ("grocery_items", "category", "TEXT NOT NULL DEFAULT 'other'"),
     ("tasks", "completed_by", "TEXT"),
+    (
+        "grocery_items",
+        "price_cents",
+        "INTEGER CHECK (price_cents IS NULL OR (price_cents >= 0 AND price_cents <= 100000000))",
+    ),
 )
 STORAGE_LIMIT_BYTES = 500 * 1024 * 1024
 
@@ -169,7 +223,7 @@ _TASK_COLUMNS = (
     "id, title, notes, assignee, due_date, recurrence, status, "
     "created_by, created_at, completed_at, priority, rotate, completed_by"
 )
-_GROCERY_COLUMNS = "id, name, quantity, checked, added_by, created_at, category"
+_GROCERY_COLUMNS = "id, name, quantity, checked, added_by, created_at, category, price_cents"
 _MEAL_COLUMNS = "id, day, slot, title, ingredients, created_by, created_at"
 _BILL_COLUMNS = (
     "id, name, amount_cents, due_date, recurrence, last_paid_on, created_by, created_at"
@@ -180,6 +234,12 @@ _EXPENSE_COLUMNS = (
     "id, day, description, amount_cents, paid_by, split, kind, created_by, created_at"
 )
 _TEMPLATE_COLUMNS = "id, kind, name, items, created_by, created_at"
+_EVENT_COLUMNS = (
+    "id, title, day, start_time, who, notes, recurrence, remind_days, created_by, created_at"
+)
+_GOAL_COLUMNS = "id, name, target_cents, due_date, icon, created_by, created_at"
+_MOVE_COLUMNS = "id, goal_id, amount_cents, person, day, note, created_at"
+_SPAWN_SLACK = timedelta(seconds=60)
 
 
 def _row_to_task(row: sqlite3.Row) -> Task:
@@ -211,6 +271,7 @@ def _row_to_grocery(row: sqlite3.Row) -> GroceryItem:
         added_by=row["added_by"],
         created_at=datetime.fromisoformat(row["created_at"]),
         category=row["category"],
+        price_cents=row["price_cents"],
     )
 
 
@@ -286,10 +347,60 @@ def _row_to_template(row: sqlite3.Row) -> Template:
     )
 
 
+def _row_to_event(row: sqlite3.Row) -> EventItem:
+    return EventItem(
+        id=row["id"],
+        title=row["title"],
+        day=date.fromisoformat(row["day"]),
+        start_time=time.fromisoformat(row["start_time"]) if row["start_time"] else None,
+        who=row["who"],
+        notes=row["notes"],
+        recurrence=row["recurrence"],
+        remind_days=row["remind_days"],
+        created_by=row["created_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_goal(row: sqlite3.Row, saved: int) -> Goal:
+    return Goal(
+        id=row["id"],
+        name=row["name"],
+        target_cents=row["target_cents"],
+        due_date=date.fromisoformat(row["due_date"]) if row["due_date"] else None,
+        icon=row["icon"],
+        saved_cents=saved,
+        created_by=row["created_by"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_move(row: sqlite3.Row) -> GoalMove:
+    return GoalMove(
+        id=row["id"],
+        goal_id=row["goal_id"],
+        amount_cents=row["amount_cents"],
+        person=row["person"],
+        day=date.fromisoformat(row["day"]),
+        note=row["note"],
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _like(text: str) -> str:
+    """LIKE pattern for a sanitised query; the escape is belt and braces."""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _utc_iso(value: datetime) -> str:
     if value.tzinfo is None:
         raise ValidationError("since must be timezone-aware")
     return value.astimezone(UTC).isoformat()
+
+
+def _time_db(value: object) -> str | None:
+    return value.strftime("%H:%M") if isinstance(value, time) else None
 
 
 def _db_value(value: object) -> object:
@@ -452,6 +563,12 @@ class SqliteRepository:
                 "UPDATE grocery_items SET checked = ? WHERE id = ?",
                 (1 if checked else 0, item_id),
             )
+        return self._require_grocery(item_id)
+
+    def set_grocery_price(self, item_id: str, price_cents: int | None) -> GroceryItem:
+        cleaned = rules.clean_price_cents(price_cents)
+        self._require_grocery(item_id)
+        self._update("grocery_items", item_id, {"price_cents": cleaned})
         return self._require_grocery(item_id)
 
     def archive_checked_grocery(self) -> int:
@@ -794,6 +911,494 @@ class SqliteRepository:
         ).fetchall()
         return [{k: rules.export_value(row[k]) for k in row.keys()} for row in rows]
 
+    # ---- permanent delete ----------------------------------------------
+    def delete_task(self, task_id: str) -> None:
+        with self._conn:
+            if not self._conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+                raise NotFoundError(f"task {task_id} not found")
+            self._conn.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
+            self._conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+
+    def delete_subtask(self, subtask_id: str) -> None:
+        self._delete("subtasks", subtask_id, "subtask")
+
+    def delete_grocery(self, item_id: str) -> None:
+        self._delete("grocery_items", item_id, "grocery item")
+
+    def delete_checked_grocery(self) -> int:
+        with self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM grocery_items WHERE checked = 1 AND archived_at IS NULL"
+            )
+        return cur.rowcount
+
+    def delete_meal(self, meal_id: str) -> None:
+        self._delete("meals", meal_id, "meal")
+
+    def delete_bill(self, bill_id: str) -> None:
+        self._delete("bills", bill_id, "bill")
+
+    def delete_note(self, note_id: str) -> None:
+        self._delete("notes", note_id, "note")
+
+    def delete_expense(self, expense_id: str) -> None:
+        self._delete("expenses", expense_id, "expense")
+
+    def delete_template(self, template_id: str) -> None:
+        self._delete("templates", template_id, "template")
+
+    def purge_archived(self) -> int:
+        total = 0
+        with self._conn:
+            # children first: subtasks that are archived or belong to an archived task
+            total += self._conn.execute(
+                "DELETE FROM subtasks WHERE archived_at IS NOT NULL OR task_id IN "
+                "(SELECT id FROM tasks WHERE archived_at IS NOT NULL)"
+            ).rowcount
+            total += self._conn.execute(
+                "DELETE FROM goal_moves WHERE goal_id IN "
+                "(SELECT id FROM goals WHERE archived_at IS NOT NULL)"
+            ).rowcount
+            for table in (
+                "tasks", "grocery_items", "meals", "bills", "notes", "expenses", "templates",
+                "events", "goals",
+            ):
+                total += self._conn.execute(
+                    f"DELETE FROM {table} WHERE archived_at IS NOT NULL"
+                ).rowcount
+        return total
+
+    # ---- round 4: activity, search ---------------------------------------
+    def list_activity(self, since: datetime, limit: int = 50) -> list[Activity]:
+        cut = _utc_iso(since)
+        n = rules.clamp_limit(limit)
+        members = self.list_members()
+        out: list[Activity] = []
+
+        def person(user_id: str | None) -> Person | None:
+            return members.get(user_id) if user_id else None
+
+        def add(sql: str, build: Callable[[sqlite3.Row], Activity]) -> None:
+            out.extend(build(r) for r in self._conn.execute(sql, (cut, n)).fetchall())
+
+        def when(value: str) -> datetime:
+            return datetime.fromisoformat(value)
+
+        add(
+            "SELECT id, title, completed_at, completed_by FROM tasks WHERE archived_at IS NULL "
+            "AND status = 'done' AND completed_at >= ? ORDER BY completed_at DESC LIMIT ?",
+            lambda r: Activity(
+                when(r["completed_at"]), person(r["completed_by"]), "finished", "task",
+                r["title"], r["id"],
+            ),
+        )
+        add(
+            "SELECT id, title, created_at, created_by FROM tasks WHERE archived_at IS NULL "
+            "AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            lambda r: Activity(
+                when(r["created_at"]), person(r["created_by"]), "added", "task",
+                r["title"], r["id"],
+            ),
+        )
+        add(
+            "SELECT id, name, created_at, added_by FROM grocery_items WHERE archived_at IS NULL "
+            "AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            lambda r: Activity(
+                when(r["created_at"]), person(r["added_by"]), "added", "grocery",
+                r["name"], r["id"],
+            ),
+        )
+        add(
+            "SELECT id, description, kind, created_at, created_by FROM expenses "
+            "WHERE archived_at IS NULL AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            lambda r: Activity(
+                when(r["created_at"]), person(r["created_by"]),
+                "settled" if r["kind"] == "settlement" else "paid", "expense",
+                r["description"], r["id"],
+            ),
+        )
+        add(
+            "SELECT id, title, updated_at, created_by FROM notes WHERE archived_at IS NULL "
+            "AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?",
+            lambda r: Activity(
+                when(r["updated_at"]), person(r["created_by"]), "updated", "note",
+                r["title"], r["id"],
+            ),
+        )
+        add(
+            "SELECT m.id, m.amount_cents, m.person, m.created_at, g.name FROM goal_moves m "
+            "JOIN goals g ON g.id = m.goal_id WHERE m.created_at >= ? "
+            "ORDER BY m.created_at DESC LIMIT ?",
+            lambda r: Activity(
+                when(r["created_at"]), r["person"],
+                "saved to" if r["amount_cents"] > 0 else "withdrew from", "goal",
+                r["name"], r["id"],
+            ),
+        )
+        add(
+            "SELECT id, title, created_at, created_by FROM events WHERE archived_at IS NULL "
+            "AND created_at >= ? ORDER BY created_at DESC LIMIT ?",
+            lambda r: Activity(
+                when(r["created_at"]), person(r["created_by"]), "added", "event",
+                r["title"], r["id"],
+            ),
+        )
+        out.sort(key=lambda a: a.at, reverse=True)
+        return out[:n]
+
+    def search(self, query: str, limit: int = 40) -> list[SearchHit]:
+        pattern = _like(rules.sanitize_search(query))
+        cap = rules.clamp_limit(limit)
+        per = rules.SEARCH_PER_SOURCE
+        # (kind, page, table, title column, snippet column, searched columns)
+        sources = (
+            ("task", "tasks", "tasks", "title", "notes", ("title", "notes")),
+            ("grocery", "grocery", "grocery_items", "name", "quantity", ("name",)),
+            ("note", "notes", "notes", "title", "body", ("title", "body")),
+            ("meal", "meals", "meals", "title", "ingredients", ("title",)),
+            ("template", "templates", "templates", "name", "items", ("name", "items")),
+            ("bill", "bills", "bills", "name", "due_date", ("name",)),
+            ("event", "calendar", "events", "title", "day", ("title",)),
+            ("goal", "goals", "goals", "name", "''", ("name",)),
+        )
+        hits: list[SearchHit] = []
+        for kind, page, table, title_col, snip_col, cols in sources:
+            where = " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in cols)
+            rows = self._conn.execute(
+                f"SELECT id, {title_col} AS t, {snip_col} AS s FROM {table} "
+                f"WHERE archived_at IS NULL AND ({where}) LIMIT ?",
+                (*([pattern] * len(cols)), per),
+            ).fetchall()
+            for r in rows:
+                snip = f"due {r['s']}" if kind == "bill" else rules.snippet(str(r["s"]))
+                hits.append(SearchHit(kind, r["id"], r["t"], snip, page))
+        return hits[:cap]
+
+    # ---- round 4: bulk, undo, restores -------------------------------------
+    def bulk_complete_tasks(self, task_ids: list[str]) -> int:
+        count = 0
+        for task_id in rules.clean_bulk_ids(task_ids):
+            try:
+                if self._require_task(task_id).status == "open":
+                    self.complete_task(task_id)
+                    count += 1
+            except NotFoundError:
+                continue
+        return count
+
+    def bulk_update_tasks(self, task_ids: list[str], **fields: object) -> int:
+        cleaned = rules.validate_bulk_task_fields(fields)
+        ids = rules.clean_bulk_ids(task_ids)
+        if not ids:
+            return 0
+        assignments = ", ".join(f"{col} = ?" for col in cleaned)
+        marks = ",".join("?" for _ in ids)
+        with self._conn:
+            cur = self._conn.execute(
+                f"UPDATE tasks SET {assignments} WHERE archived_at IS NULL AND id IN ({marks})",
+                (*[_db_value(v) for v in cleaned.values()], *ids),
+            )
+        return cur.rowcount
+
+    def bulk_archive_tasks(self, task_ids: list[str]) -> int:
+        ids = rules.clean_bulk_ids(task_ids)
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        with self._conn:
+            cur = self._conn.execute(
+                f"UPDATE tasks SET archived_at = ? WHERE archived_at IS NULL AND id IN ({marks})",
+                (rules.utc_now().isoformat(), *ids),
+            )
+        return cur.rowcount
+
+    def bulk_delete_tasks(self, task_ids: list[str]) -> int:
+        ids = rules.clean_bulk_ids(task_ids)
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        with self._conn:
+            self._conn.execute(f"DELETE FROM subtasks WHERE task_id IN ({marks})", ids)
+            cur = self._conn.execute(f"DELETE FROM tasks WHERE id IN ({marks})", ids)
+        return cur.rowcount
+
+    def undo_complete(self, task_id: str) -> Task:
+        task = self._require_task(task_id)
+        if task.status == "done" and task.recurrence != "none" and task.completed_at:
+            expected = rules.swap_assignee(task.assignee) if task.rotate else task.assignee
+            row = self._conn.execute(
+                "SELECT id FROM tasks WHERE archived_at IS NULL AND status = 'open' "
+                "AND id != ? AND title = ? AND notes = ? AND recurrence = ? AND priority = ? "
+                "AND rotate = ? AND assignee = ? AND created_at >= ? "
+                "AND NOT EXISTS (SELECT 1 FROM subtasks s WHERE s.task_id = tasks.id) "
+                "ORDER BY created_at DESC LIMIT 1",
+                (
+                    task_id, task.title, task.notes, task.recurrence, task.priority,
+                    1 if task.rotate else 0, expected,
+                    _utc_iso(task.completed_at - _SPAWN_SLACK),
+                ),
+            ).fetchone()
+            if row is not None:
+                with self._conn:
+                    self._conn.execute("DELETE FROM tasks WHERE id = ?", (row["id"],))
+        return self.reopen_task(task_id)
+
+    def restore_meal(self, meal_id: str) -> Meal:
+        self._restore("meals", meal_id, "meal")
+        return self._require_meal(meal_id)
+
+    def restore_bill(self, bill_id: str) -> Bill:
+        self._restore("bills", bill_id, "bill")
+        return self._require_bill(bill_id)
+
+    def restore_note(self, note_id: str) -> Note:
+        self._restore("notes", note_id, "note")
+        return self._require_note(note_id)
+
+    def restore_expense(self, expense_id: str) -> Expense:
+        self._restore("expenses", expense_id, "expense")
+        return self._require_expense(expense_id)
+
+    def restore_template(self, template_id: str) -> Template:
+        self._restore("templates", template_id, "template")
+        return self._require_template(template_id)
+
+    # ---- unified archive -----------------------------------------------------------
+    def list_archived_items(self, limit: int = DEFAULT_LIMIT) -> list[ArchivedItem]:
+        n = rules.clamp_limit(limit)
+        items: list[ArchivedItem] = []
+        for kind, (table, columns) in rules.ARCHIVED_SOURCES.items():
+            rows = self._conn.execute(
+                f"SELECT {columns} FROM {table} WHERE archived_at IS NOT NULL "
+                "ORDER BY archived_at DESC LIMIT ?",
+                (n,),
+            ).fetchall()
+            for row in rows:
+                title, detail = rules.archived_title_detail(kind, row)
+                archived = datetime.fromisoformat(row["archived_at"])
+                items.append(ArchivedItem(kind, row["id"], title, detail, archived))  # type: ignore[arg-type]
+        items.sort(key=lambda i: i.archived_at, reverse=True)
+        return items
+
+    def restore_item(self, kind: ArchivedKind, item_id: str) -> None:
+        rules.check_archived_kind(kind)
+        table = rules.ARCHIVED_SOURCES[kind][0]
+        if kind == "subtask":
+            row = self._conn.execute(
+                "SELECT task_id FROM subtasks WHERE id = ? AND archived_at IS NOT NULL",
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"archived subtask {item_id} not found")
+            parent = self._conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ? AND archived_at IS NULL", (row["task_id"],)
+            ).fetchone()
+            if parent is None:
+                raise ValidationError(
+                    "This subtask's task is archived or deleted - restore the task first."
+                )
+        self._restore(table, item_id, kind)
+
+    # ---- events --------------------------------------------------------------
+    def list_events(
+        self, start: date, end: date, limit: int = DEFAULT_LIMIT
+    ) -> list[EventOccurrence]:
+        lo = rules.clean_required_date(start, "start")
+        hi = rules.clean_required_date(end, "end")
+        rows = self._conn.execute(
+            f"SELECT {_EVENT_COLUMNS} FROM events WHERE archived_at IS NULL AND day <= ? "
+            "AND (recurrence != 'none' OR day >= ?) ORDER BY day LIMIT ?",
+            (hi.isoformat(), lo.isoformat(), rules.MAX_LIMIT),
+        ).fetchall()
+        return self._expand(_row_to_event(r) for r in rows)(lo, hi, limit)
+
+    def upcoming_events(
+        self, today: date, days: int = 60, limit: int = 10
+    ) -> list[EventOccurrence]:
+        first = rules.clean_required_date(today, "today")
+        span = rules.clean_int_range(days, "days", 1, 366)
+        return self.list_events(first, first + timedelta(days=span), limit)
+
+    @staticmethod
+    def _expand(events: Iterable[EventItem]) -> Callable[[date, date, int], list[EventOccurrence]]:
+        def run(lo: date, hi: date, limit: int) -> list[EventOccurrence]:
+            found = [
+                EventOccurrence(ev, d)
+                for ev in events
+                for d in rules.event_occurrences(ev, lo, hi)
+            ]
+            found.sort(key=lambda o: (o.on, o.event.start_time or time.min, o.event.title))
+            return found[: rules.clamp_limit(limit)]
+
+        return run
+
+    def add_event(
+        self,
+        title: str,
+        day: date,
+        who: EventWho = "both",
+        start_time: time | None = None,
+        notes: str = "",
+        recurrence: EventRecurrence = "none",
+        remind_days: int = 0,
+    ) -> EventItem:
+        c = rules.validate_event_fields(
+            {
+                "title": title, "day": day, "who": who, "start_time": start_time,
+                "notes": notes, "recurrence": recurrence, "remind_days": remind_days,
+            }
+        )
+        event_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO events (id, title, day, start_time, who, notes, recurrence, "
+                "remind_days, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id, c["title"], _db_value(c["day"]), _time_db(c["start_time"]),
+                    c["who"], c["notes"], c["recurrence"], c["remind_days"], self._user_id,
+                    rules.utc_now().isoformat(),
+                ),
+            )
+        return self._require_event(event_id)
+
+    def update_event(self, event_id: str, **fields: object) -> EventItem:
+        cleaned = rules.validate_event_fields(fields)
+        self._require_event(event_id)
+        if "start_time" in cleaned:
+            cleaned["start_time"] = _time_db(cleaned["start_time"])
+        self._update("events", event_id, cleaned)
+        return self._require_event(event_id)
+
+    def archive_event(self, event_id: str) -> None:
+        self._require_event(event_id)
+        self._archive("events", event_id)
+
+    def restore_event(self, event_id: str) -> EventItem:
+        self._restore("events", event_id, "event")
+        return self._require_event(event_id)
+
+    def delete_event(self, event_id: str) -> None:
+        self._delete("events", event_id, "event")
+
+    # ---- goals -------------------------------------------------------------------
+    def list_goals(self, limit: int = 50) -> list[Goal]:
+        rows = self._conn.execute(
+            f"SELECT {_GOAL_COLUMNS} FROM goals WHERE archived_at IS NULL "
+            "ORDER BY created_at, rowid LIMIT ?",
+            (rules.clamp_limit(limit),),
+        ).fetchall()
+        return [_row_to_goal(r, self._saved(r["id"])) for r in rows]
+
+    def add_goal(
+        self, name: str, target_cents: int, due_date: date | None = None, icon: str = "savings"
+    ) -> Goal:
+        c = rules.validate_goal_fields(
+            {"name": name, "target_cents": target_cents, "due_date": due_date, "icon": icon}
+        )
+        goal_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO goals (id, name, target_cents, due_date, icon, created_by, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    goal_id, c["name"], c["target_cents"], _db_value(c["due_date"]), c["icon"],
+                    self._user_id, rules.utc_now().isoformat(),
+                ),
+            )
+        return self._require_goal(goal_id)
+
+    def update_goal(self, goal_id: str, **fields: object) -> Goal:
+        cleaned = rules.validate_goal_fields(fields)
+        self._require_goal(goal_id)
+        self._update("goals", goal_id, cleaned)
+        return self._require_goal(goal_id)
+
+    def archive_goal(self, goal_id: str) -> None:
+        self._require_goal(goal_id)
+        self._archive("goals", goal_id)
+
+    def delete_goal(self, goal_id: str) -> None:
+        with self._conn:
+            if not self._conn.execute("SELECT 1 FROM goals WHERE id = ?", (goal_id,)).fetchone():
+                raise NotFoundError(f"goal {goal_id} not found")
+            self._conn.execute("DELETE FROM goal_moves WHERE goal_id = ?", (goal_id,))
+            self._conn.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
+
+    def add_goal_move(
+        self, goal_id: str, amount_cents: int, person: Person, note: str = ""
+    ) -> GoalMove:
+        c = rules.validate_goal_move(amount_cents, person, note)
+        self._require_goal(goal_id)
+        move_id = str(uuid.uuid4())
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO goal_moves (id, goal_id, amount_cents, person, day, note, "
+                "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    move_id, goal_id, c["amount_cents"], c["person"], clock.today().isoformat(),
+                    c["note"], self._user_id, rules.utc_now().isoformat(),
+                ),
+            )
+        return self._require_move(move_id)
+
+    def list_goal_moves(self, goal_id: str, limit: int = 50) -> list[GoalMove]:
+        rows = self._conn.execute(
+            f"SELECT {_MOVE_COLUMNS} FROM goal_moves WHERE goal_id = ? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            (goal_id, rules.clamp_limit(limit)),
+        ).fetchall()
+        return [_row_to_move(r) for r in rows]
+
+    def delete_goal_move(self, move_id: str) -> None:
+        self._delete("goal_moves", move_id, "goal move")
+
+    def _saved(self, goal_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(SUM(amount_cents), 0) AS s FROM goal_moves WHERE goal_id = ?",
+            (goal_id,),
+        ).fetchone()
+        return int(row["s"])
+
+    # ---- prefs ---------------------------------------------------------------------
+    def get_prefs(self) -> Prefs:
+        row = self._conn.execute(
+            "SELECT accent, pinned, start_page, compact FROM user_prefs WHERE user_id = ?",
+            (self._user_id,),
+        ).fetchone()
+        if row is None:
+            return Prefs()
+        return Prefs(
+            accent=row["accent"],
+            pinned=rules.parse_pinned(row["pinned"]),
+            start_page=row["start_page"],
+            compact=bool(row["compact"]),
+        )
+
+    def save_prefs(self, **fields: object) -> Prefs:
+        cleaned = rules.validate_prefs(fields)
+        current = self.get_prefs()
+        merged = {
+            "accent": current.accent,
+            "pinned": current.pinned,
+            "start_page": current.start_page,
+            "compact": current.compact,
+            **cleaned,
+        }
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO user_prefs (user_id, accent, pinned, start_page, compact, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user_id) DO UPDATE SET "
+                "accent = excluded.accent, pinned = excluded.pinned, "
+                "start_page = excluded.start_page, compact = excluded.compact, "
+                "updated_at = excluded.updated_at",
+                (
+                    self._user_id, merged["accent"], ",".join(merged["pinned"]),  # type: ignore[arg-type]
+                    merged["start_page"], 1 if merged["compact"] else 0,
+                    rules.utc_now().isoformat(),
+                ),
+            )
+        return self.get_prefs()
+
     # ---- storage meter -----------------------------------------------
     def storage_usage(self) -> StorageUsage:
         try:
@@ -820,6 +1425,13 @@ class SqliteRepository:
             self._conn.execute(
                 f"UPDATE {table} SET {assignments} WHERE id = ?", (*params, row_id)
             )
+
+    def _delete(self, table: str, row_id: str, label: str) -> None:
+        """Permanently deletes one row (active or archived); NotFoundError if absent."""
+        with self._conn:
+            cur = self._conn.execute(f"DELETE FROM {table} WHERE id = ?", (row_id,))
+        if cur.rowcount == 0:
+            raise NotFoundError(f"{label} {row_id} not found")
 
     def _archive(self, table: str, row_id: str) -> None:
         self._update(table, row_id, {"archived_at": rules.utc_now().isoformat()})
@@ -914,6 +1526,26 @@ class SqliteRepository:
         if row is None:
             raise NotFoundError(f"expense {expense_id} not found")
         return _row_to_expense(row)
+
+    def _require_event(self, event_id: str) -> EventItem:
+        row = self._fetch("events", _EVENT_COLUMNS, event_id)
+        if row is None:
+            raise NotFoundError(f"event {event_id} not found")
+        return _row_to_event(row)
+
+    def _require_goal(self, goal_id: str) -> Goal:
+        row = self._fetch("goals", _GOAL_COLUMNS, goal_id)
+        if row is None:
+            raise NotFoundError(f"goal {goal_id} not found")
+        return _row_to_goal(row, self._saved(goal_id))
+
+    def _require_move(self, move_id: str) -> GoalMove:
+        row = self._conn.execute(
+            f"SELECT {_MOVE_COLUMNS} FROM goal_moves WHERE id = ?", (move_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError(f"goal move {move_id} not found")
+        return _row_to_move(row)
 
     def _require_template(self, template_id: str) -> Template:
         row = self._fetch("templates", _TEMPLATE_COLUMNS, template_id)

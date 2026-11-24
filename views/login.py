@@ -11,7 +11,7 @@ from ui.common import LABELS, friendly
 def _dev_login() -> None:
     st.info("Pick who you are. No password needed in dev mode.")
     person = st.radio("I am", ["nick", "natalie"], format_func=LABELS.get, horizontal=True)
-    if st.button("Continue", type="primary", use_container_width=True):
+    if st.button("Continue", type="primary", width="stretch"):
         state.start_dev_session(person)
         st.rerun()
 
@@ -20,7 +20,7 @@ def _cloud_login() -> None:
     with st.form("login"):
         email = st.text_input("Email", autocomplete="email")
         password = st.text_input("Password", type="password", autocomplete="current-password")
-        submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Sign in", type="primary", width="stretch")
     if not submitted:
         return
     if not email or not password:
@@ -36,6 +36,7 @@ def _cloud_login() -> None:
 
 def render() -> None:
     st.title("Home")
+    st.caption("Session expired or new device? Sign in again to continue where you were.")
     if state.dev_mode():
         _dev_login()
     else:

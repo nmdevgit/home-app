@@ -3,33 +3,46 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ui import state, theme
+from core.repo import Prefs
+from ui import nav, quick_dialog, state, theme
 from views import (
+    activity,
     agenda,
     archive,
     bills,
     dashboard,
+    events,
     expenses,
+    goals,
     grocery,
     login,
     meals,
+    more,
     notes,
+    search,
     settings,
     stats,
     tasks,
     templates,
 )
 
+MODULES = {m.__name__.split('.')[-1]: m for m in (
+    activity, agenda, archive, bills, dashboard, events, expenses, goals, grocery, meals, more,
+    notes, search, settings, stats, tasks, templates)}
 
-def _logout() -> None:
-    state.sign_out()
 
-
-def _sidebar_account() -> None:
-    me = state.current_user()
-    with st.sidebar:
-        st.write(f"Signed in as **{(me or '').title()}**")
-        st.button("Log out", on_click=_logout, use_container_width=True)
+def _tab_bar(pages: dict[str, st.Page]) -> None:
+    """Bottom tab bar (fixed by CSS): Today, Tasks, + (quick add), Grocery, More."""
+    with st.container(key="tabbar"):
+        cols = st.columns(len(nav.TABS) + 1, gap="small")
+        slots = [cols[0], cols[1], cols[3], cols[4]]
+        for col, path in zip(slots, nav.TABS, strict=True):
+            page = pages[path]
+            col.page_link(page, label=page.title, icon=page.icon, width="stretch")
+        if cols[2].button("", icon=":material/add:", key="tab_add", help="Quick add"):
+            repo, me = state.current_repo(), state.current_user()
+            if repo is not None and me is not None:
+                quick_dialog.quick_add(repo, me)
 
 
 def main() -> None:
@@ -43,40 +56,38 @@ def main() -> None:
         )
         st.stop()
     state.refresh_session()
-    theme.inject()
-    if state.current_repo() is None:
-        st.navigation([st.Page(login.render, title="Sign in", url_path="login")]).run()
+    signed_in = state.current_repo() is not None
+    prefs = state.prefs() if signed_in else Prefs()
+    theme.inject(prefs.accent, prefs.compact)
+    if not signed_in:
+        stubs = [
+            st.Page(nav.login_stub(login.render, path), title=title,
+                    url_path=path + "_home" if n == 0 else path, default=(n == 0))
+            for n, (_g, title, _i, path, _m) in enumerate(nav.PAGES)
+        ]
+        # The default page is served at "/", so its own /path would be "Page not found":
+        # register an alias for it too.
+        first = nav.PAGES[0]
+        stubs.append(st.Page(nav.login_stub(login.render, first[3] + "_alias"), title=first[1],
+                             url_path=first[3]))
+        st.navigation(stubs, position="hidden").run()
         return
-    _sidebar_account()
-    core_pages = [
-        st.Page(dashboard.render, title="Today", icon=":material/today:",
-                url_path="today", default=True),
-        st.Page(tasks.render, title="Tasks", icon=":material/checklist:", url_path="tasks"),
-        st.Page(grocery.render, title="Grocery", icon=":material/shopping_cart:",
-                url_path="grocery"),
-    ]
-    plan_pages = [
-        st.Page(agenda.render, title="Agenda", icon=":material/calendar_month:",
-                url_path="agenda"),
-        st.Page(meals.render, title="Meals", icon=":material/restaurant:", url_path="meals"),
-        st.Page(bills.render, title="Bills", icon=":material/receipt_long:", url_path="bills"),
-        st.Page(expenses.render, title="Expenses", icon=":material/payments:",
-                url_path="expenses"),
-    ]
-    list_pages = [
-        st.Page(templates.render, title="Templates", icon=":material/library_add_check:",
-                url_path="templates"),
-        st.Page(notes.render, title="Notes", icon=":material/sticky_note_2:", url_path="notes"),
-    ]
-    more_pages = [
-        st.Page(stats.render, title="Stats", icon=":material/bar_chart:", url_path="stats"),
-        st.Page(archive.render, title="Archive", icon=":material/inventory_2:",
-                url_path="archive"),
-        st.Page(settings.render, title="Settings", icon=":material/settings:",
-                url_path="settings"),
-    ]
-    pages = {"": core_pages, "Plan": plan_pages, "Lists": list_pages, "More": more_pages}
-    st.navigation(pages).run()
+    start = prefs.start_page if prefs.start_page in nav.url_paths() else nav.PAGES[0][3]
+    pages = {
+        path: st.Page(MODULES[module].render, title=title, icon=icon,
+                      url_path=path + "_home" if path == start else path, default=(path == start))
+        for _g, title, icon, path, module in nav.PAGES
+    }
+    st.session_state[nav.PAGES_KEY] = pages
+    # Streamlit serves the default page at "/", so /<its path> would be "Page not found"
+    # (old bookmarks, home-screen shortcuts): add an alias that renders the same page.
+    default_row = next(r for r in nav.PAGES if r[3] == start)
+    alias = nav.login_stub(MODULES[default_row[4]].render, default_row[3] + "_alias")
+    alias_page = st.Page(alias, title=default_row[1], icon=default_row[2],
+                         url_path=default_row[3])
+    current = st.navigation([*pages.values(), alias_page], position="hidden")
+    current.run()
+    _tab_bar(pages)
 
 
 main()

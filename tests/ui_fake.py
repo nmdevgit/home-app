@@ -1,15 +1,25 @@
 """Tiny in-memory Repository for UI tests (independent of the SQLite/Supabase backends)."""
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
+from core.errors import NotFoundError, ValidationError
 from core.repo import (
+    Activity,
+    ArchivedItem,
     Bill,
+    EventItem,
+    EventOccurrence,
     Expense,
+    Goal,
+    GoalMove,
     GroceryItem,
     Meal,
     Note,
+    Prefs,
+    SearchHit,
     StorageUsage,
     Subtask,
     Task,
@@ -34,6 +44,14 @@ class FakeRepo:
         self.subtasks: dict[str, Subtask] = {}
         self.expenses: dict[str, Expense] = {}
         self.templates: dict[str, Template] = {}
+        self.events: dict[str, EventItem] = {}
+        self.archived_events: dict[str, EventItem] = {}
+        self.goals: dict[str, Goal] = {}
+        self.goal_moves: dict[str, GoalMove] = {}
+        self.prefs = Prefs()
+        self.archived: dict[str, dict[str, Any]] = {
+            "meal": {}, "bill": {}, "note": {}, "expense": {}, "template": {},
+        }
 
     def _id(self) -> str:
         self.n += 1
@@ -92,6 +110,9 @@ class FakeRepo:
     def set_grocery_checked(self, item_id: str, checked: bool) -> GroceryItem:
         return self.update_grocery(item_id, checked=checked)
 
+    def set_grocery_price(self, item_id: str, price_cents: int | None) -> GroceryItem:
+        return self.update_grocery(item_id, price_cents=price_cents)
+
     def archive_checked_grocery(self) -> int:
         ids = [i for i, g in self.grocery.items() if g.checked]
         for i in ids:
@@ -123,7 +144,7 @@ class FakeRepo:
         return self.meals[meal_id]
 
     def archive_meal(self, meal_id: str) -> None:
-        self.meals.pop(meal_id)
+        self.archived["meal"][meal_id] = self.meals.pop(meal_id)
 
     def meal_to_grocery(self, meal_id: str) -> int:
         lines = [x for x in self.meals[meal_id].ingredients.splitlines() if x.strip()]
@@ -152,7 +173,7 @@ class FakeRepo:
                                 due_date=bill.due_date + timedelta(days=30))
 
     def archive_bill(self, bill_id: str) -> None:
-        self.bills.pop(bill_id)
+        self.archived["bill"][bill_id] = self.bills.pop(bill_id)
 
     # notes
     def list_notes(self, limit: int = 300) -> list[Note]:
@@ -169,7 +190,7 @@ class FakeRepo:
         return self.notes[note_id]
 
     def archive_note(self, note_id: str) -> None:
-        self.notes.pop(note_id)
+        self.archived["note"][note_id] = self.notes.pop(note_id)
 
     def storage_usage(self) -> StorageUsage:
         return StorageUsage(450 * 1024 * 1024, 500 * 1024 * 1024)
@@ -203,7 +224,7 @@ class FakeRepo:
         return exp
 
     def archive_expense(self, expense_id: str) -> None:
-        self.expenses.pop(expense_id)
+        self.archived["expense"][expense_id] = self.expenses.pop(expense_id)
 
     # templates
     def list_templates(self, kind: str | None = None, limit: int = 300) -> list[Template]:
@@ -220,7 +241,7 @@ class FakeRepo:
         return self.templates[template_id]
 
     def archive_template(self, template_id: str) -> None:
-        self.templates.pop(template_id)
+        self.archived["template"][template_id] = self.templates.pop(template_id)
 
     def template_to_grocery(self, template_id: str) -> int:
         lines = [x for x in self.templates[template_id].items.splitlines() if x.strip()]
@@ -228,9 +249,202 @@ class FakeRepo:
             self.add_grocery(line.strip())
         return len(lines)
 
+    # permanent delete
+    def delete_task(self, task_id: str) -> None:
+        self.tasks.pop(task_id, None) or self.archived_tasks.pop(task_id)
+        for sid in [s for s, x in self.subtasks.items() if x.task_id == task_id]:
+            self.subtasks.pop(sid)
+
+    def delete_subtask(self, subtask_id: str) -> None:
+        self.subtasks.pop(subtask_id)
+
+    def delete_grocery(self, item_id: str) -> None:
+        self.grocery.pop(item_id, None) or self.archived_grocery.pop(item_id)
+
+    def delete_checked_grocery(self) -> int:
+        ids = [i for i, g in self.grocery.items() if g.checked]
+        for i in ids:
+            self.grocery.pop(i)
+        return len(ids)
+
+    def delete_meal(self, meal_id: str) -> None:
+        self.meals.pop(meal_id)
+
+    def delete_bill(self, bill_id: str) -> None:
+        self.bills.pop(bill_id)
+
+    def delete_note(self, note_id: str) -> None:
+        self.notes.pop(note_id)
+
+    def delete_expense(self, expense_id: str) -> None:
+        self.expenses.pop(expense_id)
+
+    def list_archived_items(self, limit: int = 300) -> list[ArchivedItem]:
+        out = []
+        buckets = {**self.archived, "event": self.archived_events}
+        for kind, rows in buckets.items():
+            for rid, row in rows.items():
+                title = getattr(row, "title", None) or getattr(row, "name", None) or str(rid)
+                out.append(ArchivedItem(kind, str(rid), str(title), "", _now()))  # type: ignore[arg-type]
+        return out[:limit]
+
+    def restore_item(self, kind: str, item_id: str) -> None:
+        if kind not in ("meal", "bill", "note", "expense", "template", "event", "goal", "subtask"):
+            raise ValidationError(f"unknown archived kind: {kind!r}")
+        if kind in ("goal", "subtask"):
+            raise NotFoundError(f"archived {kind} {item_id} not found")
+        getattr(self, f"restore_{kind}")(item_id)
+
+    def delete_template(self, template_id: str) -> None:
+        self.templates.pop(template_id)
+
+    def purge_archived(self) -> int:
+        n = len(self.archived_tasks) + len(self.archived_grocery)
+        self.archived_tasks.clear()
+        self.archived_grocery.clear()
+        return n
+
     # people and export
     def list_members(self) -> dict[str, str]:
         return {"u": "nick"}
 
     def export_rows(self, table: str, limit: int = 5000) -> list[dict[str, object]]:
         return [{"id": "1", "title": "=SUM(A1)"}] if table == "notes" else []
+
+    # ---- round 4 -------------------------------------------------------------
+    def list_activity(self, since: datetime, limit: int = 50) -> list[Activity]:
+        out = [
+            Activity(t.created_at, "nick", "added", "task", t.title, t.id)
+            for t in self.tasks.values()
+        ]
+        return sorted(out, key=lambda a: a.at, reverse=True)[:limit]
+
+    def search(self, query: str, limit: int = 40) -> list[SearchHit]:
+        q = query.strip().lower()
+        hits = [SearchHit("task", t.id, t.title, t.notes, "tasks") for t in self.tasks.values()
+                if q in t.title.lower()]
+        hits += [SearchHit("note", n.id, n.title, n.body, "notes") for n in self.notes.values()
+                 if q in n.title.lower()]
+        return hits[:limit]
+
+    def bulk_complete_tasks(self, task_ids: list[str]) -> int:
+        for i in task_ids:
+            self.complete_task(i)
+        return len(task_ids)
+
+    def bulk_update_tasks(self, task_ids: list[str], **fields: Any) -> int:
+        for i in task_ids:
+            self.update_task(i, **fields)
+        return len(task_ids)
+
+    def bulk_archive_tasks(self, task_ids: list[str]) -> int:
+        for i in task_ids:
+            self.archive_task(i)
+        return len(task_ids)
+
+    def bulk_delete_tasks(self, task_ids: list[str]) -> int:
+        for i in task_ids:
+            self.delete_task(i)
+        return len(task_ids)
+
+    def undo_complete(self, task_id: str) -> Task:
+        return self.reopen_task(task_id)
+
+    def restore_meal(self, meal_id: str) -> Meal:
+        return self.meals.setdefault(meal_id, self.archived["meal"].pop(meal_id))
+
+    def restore_bill(self, bill_id: str) -> Bill:
+        return self.bills.setdefault(bill_id, self.archived["bill"].pop(bill_id))
+
+    def restore_note(self, note_id: str) -> Note:
+        return self.notes.setdefault(note_id, self.archived["note"].pop(note_id))
+
+    def restore_expense(self, expense_id: str) -> Expense:
+        return self.expenses.setdefault(expense_id, self.archived["expense"].pop(expense_id))
+
+    def restore_template(self, template_id: str) -> Template:
+        return self.templates.setdefault(
+            template_id, self.archived["template"].pop(template_id))
+
+    # events
+    def _occ(self, start: date, end: date) -> list[EventOccurrence]:
+        return sorted(
+            (EventOccurrence(e, e.day) for e in self.events.values() if start <= e.day <= end),
+            key=lambda o: o.on)
+
+    def list_events(self, start: date, end: date, limit: int = 300) -> list[EventOccurrence]:
+        return self._occ(start, end)[:limit]
+
+    def upcoming_events(
+        self, today: date, days: int = 60, limit: int = 10
+    ) -> list[EventOccurrence]:
+        return self._occ(today, today + timedelta(days=days))[:limit]
+
+    def add_event(self, title: str, day: date, who: str = "both", start_time: time | None = None,
+                  notes: str = "", recurrence: str = "none", remind_days: int = 0) -> EventItem:
+        ev = EventItem(self._id(), title, day, start_time, who, notes, recurrence,  # type: ignore[arg-type]
+                       remind_days, "u", _now())
+        self.events[ev.id] = ev
+        return ev
+
+    def update_event(self, event_id: str, **fields: Any) -> EventItem:
+        self.events[event_id] = replace(self.events[event_id], **fields)
+        return self.events[event_id]
+
+    def archive_event(self, event_id: str) -> None:
+        self.archived_events[event_id] = self.events.pop(event_id)
+
+    def restore_event(self, event_id: str) -> EventItem:
+        self.events[event_id] = self.archived_events.pop(event_id)
+        return self.events[event_id]
+
+    def delete_event(self, event_id: str) -> None:
+        gone = self.events.pop(event_id, None) or self.archived_events.pop(event_id, None)
+        if gone is None:
+            raise NotFoundError(event_id)
+
+    # goals
+    def list_goals(self, limit: int = 50) -> list[Goal]:
+        return list(self.goals.values())[:limit]
+
+    def add_goal(self, name: str, target_cents: int, due_date: date | None = None,
+                 icon: str = "savings") -> Goal:
+        goal = Goal(self._id(), name, target_cents, due_date, icon, 0, "u", _now())
+        self.goals[goal.id] = goal
+        return goal
+
+    def update_goal(self, goal_id: str, **fields: Any) -> Goal:
+        self.goals[goal_id] = replace(self.goals[goal_id], **fields)
+        return self.goals[goal_id]
+
+    def archive_goal(self, goal_id: str) -> None:
+        self.goals.pop(goal_id)
+
+    def delete_goal(self, goal_id: str) -> None:
+        self.goals.pop(goal_id)
+        for mid in [m for m, x in self.goal_moves.items() if x.goal_id == goal_id]:
+            self.goal_moves.pop(mid)
+
+    def add_goal_move(self, goal_id: str, amount_cents: int, person: str,
+                      note: str = "") -> GoalMove:
+        move = GoalMove(self._id(), goal_id, amount_cents, person, date.today(), note, _now())  # type: ignore[arg-type]
+        self.goal_moves[move.id] = move
+        goal = self.goals[goal_id]
+        self.goals[goal_id] = replace(goal, saved_cents=goal.saved_cents + amount_cents)
+        return move
+
+    def list_goal_moves(self, goal_id: str, limit: int = 50) -> list[GoalMove]:
+        return [m for m in self.goal_moves.values() if m.goal_id == goal_id][:limit]
+
+    def delete_goal_move(self, move_id: str) -> None:
+        move = self.goal_moves.pop(move_id)
+        goal = self.goals[move.goal_id]
+        self.goals[move.goal_id] = replace(goal, saved_cents=goal.saved_cents - move.amount_cents)
+
+    # prefs
+    def get_prefs(self) -> Prefs:
+        return self.prefs
+
+    def save_prefs(self, **fields: Any) -> Prefs:
+        self.prefs = replace(self.prefs, **fields)
+        return self.prefs

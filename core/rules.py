@@ -5,26 +5,35 @@ Kept separate so SQLite and Supabase repos enforce identical behaviour.
 from __future__ import annotations
 
 import calendar
+import re
 from collections.abc import Iterable
-from datetime import UTC, date, datetime, timedelta
-from typing import get_args
+from datetime import UTC, date, datetime, time, timedelta
+from typing import TYPE_CHECKING, get_args
 
 from core import clock
 from core.errors import ValidationError
 from core.repo import (
     EXPORT_TABLES,
+    GOAL_ICONS,
+    Accent,
     Assignee,
     BillRecurrence,
+    EventRecurrence,
+    EventWho,
     Expense,
     ExpenseKind,
     ExpenseSplit,
     GroceryCategory,
+    GroceryItem,
     MealSlot,
     Person,
     Priority,
     Recurrence,
     TemplateKind,
 )
+
+if TYPE_CHECKING:
+    from core.repo import Goal
 
 MAX_TITLE = 200
 MAX_NOTES = 2000
@@ -61,7 +70,9 @@ SLOT_ORDER: dict[str, int] = {"breakfast": 0, "lunch": 1, "dinner": 2}
 UPDATABLE_TASK_FIELDS: frozenset[str] = frozenset(
     {"title", "notes", "assignee", "due_date", "recurrence", "priority", "rotate"}
 )
-UPDATABLE_GROCERY_FIELDS: frozenset[str] = frozenset({"name", "quantity", "category"})
+UPDATABLE_GROCERY_FIELDS: frozenset[str] = frozenset(
+    {"name", "quantity", "category", "price_cents"}
+)
 UPDATABLE_MEAL_FIELDS: frozenset[str] = frozenset({"day", "slot", "title", "ingredients"})
 UPDATABLE_BILL_FIELDS: frozenset[str] = frozenset(
     {"name", "amount_cents", "due_date", "recurrence"}
@@ -260,6 +271,22 @@ def _reject_unknown(fields: dict[str, object], allowed: frozenset[str]) -> None:
         raise ValidationError(f"cannot update field(s): {sorted(unknown)}")
 
 
+def clean_price_cents(value: object) -> int | None:
+    """Grocery line price: None clears it, else an int 0..MAX_AMOUNT_CENTS (bools rejected)."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationError("price_cents must be a whole number of cents")
+    if not 0 <= value <= MAX_AMOUNT_CENTS:
+        raise ValidationError(f"price_cents must be between 0 and {MAX_AMOUNT_CENTS}")
+    return value
+
+
+def cart_total_cents(items: Iterable[GroceryItem]) -> int:
+    """Sum of price_cents over checked items that have a price."""
+    return sum(i.price_cents for i in items if i.checked and i.price_cents is not None)
+
+
 def validate_grocery_fields(fields: dict[str, object]) -> dict[str, object]:
     _reject_unknown(fields, UPDATABLE_GROCERY_FIELDS)
     cleaned: dict[str, object] = {}
@@ -268,6 +295,8 @@ def validate_grocery_fields(fields: dict[str, object]) -> dict[str, object]:
             cleaned[key] = clean_text(value, "name", MAX_GROCERY_NAME, required=True)
         elif key == "quantity":
             cleaned[key] = clean_text(value, "quantity", MAX_QUANTITY, required=False)
+        elif key == "price_cents":
+            cleaned[key] = clean_price_cents(value)
         else:
             cleaned[key] = clean_choice(value, "category", GROCERY_CATEGORIES)
     return cleaned
@@ -445,3 +474,281 @@ def expense_balance_cents(expenses: Iterable[Expense]) -> int:
             owed = 0
         total += owed if exp.paid_by == "nick" else -owed
     return total
+
+
+# ---- round 4: search, bulk, events, goals, prefs -------------------------------------
+MIN_SEARCH = 2
+MAX_SEARCH = 60
+MAX_BULK_IDS = 50
+MAX_EVENT_TITLE = 120
+MAX_EVENT_NOTES = 1000
+MAX_REMIND_DAYS = 60
+MAX_OCCURRENCES = 400  # hard cap on one event's expansion inside a window
+MAX_GOAL_NAME = 80
+MAX_GOAL_TARGET_CENTS = 1_000_000_000
+MAX_GOAL_NOTE = 120
+MAX_PINNED = 6
+MAX_GOAL_MOVES_SUM = 10_000  # rows read when summing a goal's moves
+SEARCH_PER_SOURCE = 8
+SEARCH_SNIPPET = 80
+# Characters that are special in PostgREST or=/ilike filters or in SQL LIKE (plus the
+# double quote we use to wrap values). They are removed from the query, never escaped.
+_SEARCH_STRIP = re.compile(r'[,()*%_\\"]')
+
+EVENT_WHO: frozenset[str] = frozenset(get_args(EventWho))
+EVENT_RECURRENCES: frozenset[str] = frozenset(get_args(EventRecurrence))
+ACCENTS: frozenset[str] = frozenset(get_args(Accent))
+GOAL_ICON_SET: frozenset[str] = frozenset(GOAL_ICONS)
+# url_paths a person may pin or start on (kept in sync with ui/nav.PAGES by hand).
+PAGE_KEYS: frozenset[str] = frozenset(
+    {
+        "today", "tasks", "grocery", "agenda", "calendar", "meals", "bills", "expenses",
+        "goals", "templates", "notes", "more", "stats", "activity", "search", "archive",
+        "settings",
+    }
+)
+UPDATABLE_EVENT_FIELDS: frozenset[str] = frozenset(
+    {"title", "day", "start_time", "who", "notes", "recurrence", "remind_days"}
+)
+UPDATABLE_GOAL_FIELDS: frozenset[str] = frozenset({"name", "target_cents", "due_date", "icon"})
+BULK_TASK_FIELDS: frozenset[str] = frozenset({"assignee", "due_date", "priority"})
+PREF_FIELDS: frozenset[str] = frozenset({"accent", "pinned", "start_page", "compact"})
+
+
+def sanitize_search(query: object) -> str:
+    """Validate (stripped, 2..60 chars) then remove filter-special characters.
+
+    Raises ValidationError when the stripped query is too short/long or nothing is left
+    after sanitising. The result is safe to splice into a PostgREST filter or LIKE pattern.
+    """
+    text = clean_text(query, "query", MAX_SEARCH, required=True)
+    if len(text) < MIN_SEARCH:
+        raise ValidationError(f"query must be at least {MIN_SEARCH} characters")
+    cleaned = " ".join(_SEARCH_STRIP.sub("", text).split())
+    if not cleaned:
+        raise ValidationError("query has no searchable characters")
+    return cleaned
+
+
+def snippet(text: str, limit: int = SEARCH_SNIPPET) -> str:
+    one_line = " ".join(text.split())
+    return one_line if len(one_line) <= limit else one_line[: limit - 1] + "\u2026"
+
+
+def clean_bulk_ids(ids: object) -> list[str]:
+    """Distinct non-empty string ids, order kept; more than 50 is a ValidationError."""
+    if isinstance(ids, str) or not isinstance(ids, list | tuple | set | frozenset):
+        raise ValidationError("ids must be a list of ids")
+    out: list[str] = []
+    for item in ids:
+        if not isinstance(item, str) or not item:
+            raise ValidationError("ids must be non-empty text")
+        if item not in out:
+            out.append(item)
+    if len(out) > MAX_BULK_IDS:
+        raise ValidationError(f"at most {MAX_BULK_IDS} items at a time")
+    return out
+
+
+def validate_bulk_task_fields(fields: dict[str, object]) -> dict[str, object]:
+    if not fields:
+        raise ValidationError("nothing to update")
+    _reject_unknown(fields, BULK_TASK_FIELDS)
+    return validate_task_fields(fields)
+
+
+def clean_time(value: object, field: str = "start_time") -> time | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime) or not isinstance(value, time):
+        raise ValidationError(f"{field} must be a time or None")
+    return value.replace(second=0, microsecond=0, tzinfo=None)
+
+
+def clean_int_range(value: object, field: str, low: int, high: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationError(f"{field} must be a whole number")
+    if not low <= value <= high:
+        raise ValidationError(f"{field} must be between {low} and {high}")
+    return value
+
+
+def validate_event_fields(fields: dict[str, object]) -> dict[str, object]:
+    _reject_unknown(fields, UPDATABLE_EVENT_FIELDS)
+    cleaned: dict[str, object] = {}
+    for key, value in fields.items():
+        if key == "title":
+            cleaned[key] = clean_text(value, "title", MAX_EVENT_TITLE, required=True)
+        elif key == "day":
+            cleaned[key] = clean_required_date(value, "day")
+        elif key == "start_time":
+            cleaned[key] = clean_time(value)
+        elif key == "who":
+            cleaned[key] = clean_choice(value, "who", EVENT_WHO)
+        elif key == "notes":
+            cleaned[key] = clean_text(value, "notes", MAX_EVENT_NOTES, required=False)
+        elif key == "recurrence":
+            cleaned[key] = clean_choice(value, "recurrence", EVENT_RECURRENCES)
+        else:
+            cleaned[key] = clean_int_range(value, "remind_days", 0, MAX_REMIND_DAYS)
+    return cleaned
+
+
+def validate_goal_fields(fields: dict[str, object]) -> dict[str, object]:
+    _reject_unknown(fields, UPDATABLE_GOAL_FIELDS)
+    cleaned: dict[str, object] = {}
+    for key, value in fields.items():
+        if key == "name":
+            cleaned[key] = clean_text(value, "name", MAX_GOAL_NAME, required=True)
+        elif key == "target_cents":
+            cleaned[key] = clean_int_range(value, "target_cents", 1, MAX_GOAL_TARGET_CENTS)
+        elif key == "due_date":
+            cleaned[key] = clean_due_date(value)
+        else:
+            cleaned[key] = clean_choice(value, "icon", GOAL_ICON_SET)
+    return cleaned
+
+
+def validate_goal_move(amount_cents: object, person: object, note: object) -> dict[str, object]:
+    big = MAX_GOAL_TARGET_CENTS
+    amount = clean_int_range(amount_cents, "amount_cents", -big, big)
+    if amount == 0:
+        raise ValidationError("amount_cents must not be zero")
+    return {
+        "amount_cents": amount,
+        "person": clean_choice(person, "person", PEOPLE),
+        "note": clean_text(note, "note", MAX_GOAL_NOTE, required=False),
+    }
+
+
+def validate_prefs(fields: dict[str, object]) -> dict[str, object]:
+    """Validated partial prefs. `pinned` becomes a de-duplicated tuple of page keys."""
+    _reject_unknown(fields, PREF_FIELDS)
+    cleaned: dict[str, object] = {}
+    for key, value in fields.items():
+        if key == "accent":
+            cleaned[key] = clean_choice(value, "accent", ACCENTS)
+        elif key == "start_page":
+            cleaned[key] = clean_choice(value, "start_page", PAGE_KEYS)
+        elif key == "compact":
+            cleaned[key] = clean_bool(value, "compact")
+        else:
+            if isinstance(value, str) or not isinstance(value, list | tuple):
+                raise ValidationError("pinned must be a list of pages")
+            pins: list[str] = []
+            for item in value:
+                page = clean_choice(item, "pinned page", PAGE_KEYS)
+                if page not in pins:
+                    pins.append(page)
+            if len(pins) > MAX_PINNED:
+                raise ValidationError(f"pin at most {MAX_PINNED} pages")
+            cleaned[key] = tuple(pins)
+    return cleaned
+
+
+def parse_pinned(text: str | None) -> tuple[str, ...]:
+    """Stored csv -> known page keys only (ignores junk written by hand)."""
+    pins = [p for p in (text or "").split(",") if p in PAGE_KEYS]
+    return tuple(dict.fromkeys(pins))[:MAX_PINNED]
+
+
+def _yearly(anchor: date, year: int) -> date:
+    # Feb 29 anniversaries fall on Feb 28 in non-leap years.
+    return date(year, anchor.month, min(anchor.day, calendar.monthrange(year, anchor.month)[1]))
+
+
+def event_occurrences(event: object, start: date, end: date) -> list[date]:
+    """Dates within [start, end] on which `event` (needs .day and .recurrence) falls.
+
+    Never earlier than the anchor day; at most MAX_OCCURRENCES results; cost is
+    proportional to the results, not to how far in the past the anchor is.
+    """
+    anchor: date = event.day  # type: ignore[attr-defined]
+    recurrence: str = event.recurrence  # type: ignore[attr-defined]
+    if recurrence == "none":
+        return [anchor] if start <= anchor <= end else []
+    start = max(start, anchor)
+    if end < start:
+        return []
+    out: list[date] = []
+    if recurrence == "weekly":
+        k = -(-(start - anchor).days // 7)
+        while len(out) < MAX_OCCURRENCES and (d := anchor + timedelta(days=7 * k)) <= end:
+            out.append(d)
+            k += 1
+    elif recurrence == "monthly":
+        months = (start.year - anchor.year) * 12 + start.month - anchor.month
+        k = max(0, months)
+        while len(out) < MAX_OCCURRENCES and (d := add_months(anchor, k)) <= end:
+            if d >= start:
+                out.append(d)
+            k += 1
+    elif recurrence == "yearly":
+        year = start.year
+        while len(out) < MAX_OCCURRENCES and year <= min(end.year, date.max.year):
+            d = _yearly(anchor, year)
+            if start <= d <= end:
+                out.append(d)
+            year += 1
+    else:
+        raise ValidationError(f"unknown event recurrence {recurrence!r}")
+    return out
+
+
+def goal_pace(goal: Goal, today: date) -> int:
+    """Cents per week still needed to hit the target by the due date (0 if reached or no
+    due date; the whole remainder if the due date is today or past)."""
+    remaining = goal.target_cents - goal.saved_cents
+    if remaining <= 0 or goal.due_date is None:
+        return 0
+    days = (goal.due_date - today).days
+    if days <= 0:
+        return remaining
+    weeks = -(-days // 7)
+    return -(-remaining // weeks)
+
+
+# ---- unified archive (list_archived_items / restore_item) --------------------------------
+# kind -> (table, columns selected for the listing)
+ARCHIVED_SOURCES: dict[str, tuple[str, str]] = {
+    "meal": ("meals", "id, title, day, slot, archived_at"),
+    "bill": ("bills", "id, name, amount_cents, due_date, archived_at"),
+    "note": ("notes", "id, title, archived_at"),
+    "expense": ("expenses", "id, description, amount_cents, day, archived_at"),
+    "template": ("templates", "id, name, kind, archived_at"),
+    "event": ("events", "id, title, day, archived_at"),
+    "goal": ("goals", "id, name, target_cents, due_date, archived_at"),
+    "subtask": ("subtasks", "id, title, done, archived_at"),
+}
+
+
+def check_archived_kind(kind: object) -> str:
+    if not isinstance(kind, str) or kind not in ARCHIVED_SOURCES:
+        raise ValidationError(f"unknown archived kind: {kind!r}")
+    return kind
+
+
+def money_text(cents: int) -> str:
+    return f"${cents // 100:,}.{cents % 100:02d}"
+
+
+def archived_title_detail(kind: str, row: dict[str, object] | object) -> tuple[str, str]:
+    """(title, detail) for one archived row; `row` is a dict or sqlite3.Row."""
+    def g(key: str) -> object:
+        return row[key]  # type: ignore[index]
+
+    if kind == "meal":
+        return str(g("title")), f"{g('slot')} on {g('day')}"
+    if kind == "bill":
+        return str(g("name")), f"{money_text(int(g('amount_cents')))} due {g('due_date')}"  # type: ignore[call-overload]
+    if kind == "note":
+        return str(g("title")), "Note"
+    if kind == "expense":
+        return str(g("description")), f"{money_text(int(g('amount_cents')))} on {g('day')}"  # type: ignore[call-overload]
+    if kind == "template":
+        return str(g("name")), f"{g('kind')} list"
+    if kind == "event":
+        return str(g("title")), str(g("day"))
+    if kind == "goal":
+        return str(g("name")), f"target {money_text(int(g('target_cents')))}"  # type: ignore[call-overload]
+    return str(g("title")), "done" if g("done") else "to do"

@@ -1,13 +1,13 @@
 """Shared contract between backend and frontend. PM-owned: change only via PM.
 
-Rules: NO hard deletes anywhere ('archive_*' sets archived_at; archived rows are
-hidden from list_* but kept; 'restore_*' clears archived_at). Every list_* takes a
+Rules: 'archive_*' sets archived_at (hidden, restorable); ROUND 4 (Nick's request) adds
+real 'delete_*' (permanent) for every entity plus purge_archived(). Every list_* takes a
 `limit` so pages never load unbounded data (free-tier memory limits).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Literal, Protocol
 
 Assignee = Literal["nick", "natalie", "either"]
@@ -23,8 +23,13 @@ Person = Literal["nick", "natalie"]
 ExpenseSplit = Literal["equal", "payer_only", "other_only"]
 ExpenseKind = Literal["expense", "settlement"]
 TemplateKind = Literal["shopping", "recipe"]
+EventWho = Literal["nick", "natalie", "both"]
+EventRecurrence = Literal["none", "weekly", "monthly", "yearly"]
+Accent = Literal["teal", "indigo", "rose", "amber", "violet"]
+GOAL_ICONS = ("savings", "holiday", "home", "car", "gift", "wedding", "tech", "other")
 EXPORT_TABLES = (
     "tasks", "subtasks", "grocery_items", "meals", "bills", "notes", "expenses", "templates",
+    "events", "goals", "goal_moves",
 )
 
 DEFAULT_LIMIT = 300
@@ -94,6 +99,9 @@ class GroceryItem:
     added_by: str
     created_at: datetime
     category: GroceryCategory = "other"
+    # Price of this line in integer cents (whole line, not per unit); None = not entered.
+    # Shown for items in the cart; the cart total is the sum over checked items.
+    price_cents: int | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +136,90 @@ class Note:
     created_by: str
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class Activity:
+    """One 'who did what' line. Newest first in list_activity."""
+    at: datetime
+    person: Person | None
+    verb: str  # e.g. 'finished', 'added', 'paid', 'updated', 'saved to'
+    kind: str  # 'task' | 'grocery' | 'expense' | 'note' | 'goal' | 'event'
+    title: str
+    ref_id: str
+
+
+@dataclass(frozen=True)
+class EventItem:
+    id: str
+    title: str
+    day: date  # first/anchor date
+    start_time: time | None
+    who: EventWho
+    notes: str
+    recurrence: EventRecurrence
+    remind_days: int  # 0..60: show a countdown chip this many days ahead
+    created_by: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class EventOccurrence:
+    event: EventItem
+    on: date  # the concrete date this occurrence falls on
+
+
+@dataclass(frozen=True)
+class Goal:
+    id: str
+    name: str
+    target_cents: int  # 1..1_000_000_000
+    due_date: date | None
+    icon: str  # one of GOAL_ICONS
+    saved_cents: int  # sum of goal_moves (computed in repo)
+    created_by: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class GoalMove:
+    id: str
+    goal_id: str
+    amount_cents: int  # non-zero; negative = withdrawal
+    person: Person
+    day: date
+    note: str  # <=120 chars
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    kind: str  # 'task' | 'grocery' | 'note' | 'meal' | 'template' | 'bill' | 'event' | 'goal'
+    id: str
+    title: str
+    snippet: str
+    page: str  # url_path of the page that shows it, e.g. 'tasks'
+
+
+@dataclass(frozen=True)
+class Prefs:
+    accent: Accent = "teal"
+    pinned: tuple[str, ...] = ()  # page url_paths, max 6
+    start_page: str = "today"
+    compact: bool = False
+
+
+ArchivedKind = Literal["meal", "bill", "note", "expense", "template", "event", "goal", "subtask"]
+
+
+@dataclass(frozen=True)
+class ArchivedItem:
+    """Anything archived that is NOT a task or grocery item (those have their own lists)."""
+    kind: ArchivedKind
+    id: str
+    title: str
+    detail: str  # short human text, e.g. date or amount
+    archived_at: datetime
 
 
 @dataclass(frozen=True)
@@ -173,6 +265,9 @@ class Repository(Protocol):
         """Editable: name, quantity, category."""
         ...
     def set_grocery_checked(self, item_id: str, checked: bool) -> GroceryItem: ...
+    def set_grocery_price(self, item_id: str, price_cents: int | None) -> GroceryItem:
+        """0..100_000_000 cents, or None to clear. Works on any item."""
+        ...
     def archive_checked_grocery(self) -> int:
         """Archives (never deletes) all checked items; returns count."""
         ...
@@ -261,6 +356,99 @@ class Repository(Protocol):
     def export_rows(self, table: str, limit: int = 5000) -> list[dict[str, object]]:
         """All rows INCLUDING archived, JSON/CSV-friendly values (ISO strings), for the
         'Download my data' button. `table` must be one of EXPORT_TABLES, else ValidationError."""
+        ...
+
+    # --- round 4: derived feeds, search, bulk, undo, restores --------------------------
+    def list_activity(self, since: datetime, limit: int = 50) -> list[Activity]:
+        """Merge recent events from tasks (finished/added), grocery added, expenses, notes
+        updated, goal moves, events added. Each source capped at `limit`; newest first."""
+        ...
+    def search(self, query: str, limit: int = 40) -> list[SearchHit]:
+        """query stripped, 2..60 chars else ValidationError; special filter chars
+        (, ( ) * % _ backslash) removed before building any filter. Non-archived only,
+        max 8 hits per source."""
+        ...
+    def bulk_complete_tasks(self, task_ids: list[str]) -> int: ...  # max 50
+    def bulk_update_tasks(self, task_ids: list[str], **fields: object) -> int:
+        """Only assignee, due_date, priority are allowed."""
+        ...
+    def bulk_archive_tasks(self, task_ids: list[str]) -> int: ...
+    def bulk_delete_tasks(self, task_ids: list[str]) -> int: ...
+    def undo_complete(self, task_id: str) -> Task:
+        """Reopen; if completing spawned a recurring occurrence that is still open and
+        untouched, delete that occurrence."""
+        ...
+    def restore_meal(self, meal_id: str) -> Meal: ...
+    def restore_bill(self, bill_id: str) -> Bill: ...
+    def restore_note(self, note_id: str) -> Note: ...
+    def restore_expense(self, expense_id: str) -> Expense: ...
+    def restore_template(self, template_id: str) -> Template: ...
+
+    # --- events (shared calendar / countdowns) ---------------------------------------
+    def list_events(
+        self, start: date, end: date, limit: int = DEFAULT_LIMIT
+    ) -> list[EventOccurrence]:
+        """Occurrences (recurrences expanded) within [start, end], sorted by date."""
+        ...
+    def upcoming_events(
+        self, today: date, days: int = 60, limit: int = 10
+    ) -> list[EventOccurrence]: ...
+    def add_event(
+        self, title: str, day: date, who: EventWho = "both", start_time: time | None = None,
+        notes: str = "", recurrence: EventRecurrence = "none", remind_days: int = 0,
+    ) -> EventItem: ...
+    def update_event(self, event_id: str, **fields: object) -> EventItem: ...
+    def archive_event(self, event_id: str) -> None: ...
+    def restore_event(self, event_id: str) -> EventItem: ...
+    def delete_event(self, event_id: str) -> None: ...
+
+    # --- savings goals -----------------------------------------------------------------
+    def list_goals(self, limit: int = 50) -> list[Goal]: ...
+    def add_goal(
+        self, name: str, target_cents: int, due_date: date | None = None, icon: str = "savings"
+    ) -> Goal: ...
+    def update_goal(self, goal_id: str, **fields: object) -> Goal: ...
+    def archive_goal(self, goal_id: str) -> None: ...
+    def delete_goal(self, goal_id: str) -> None: ...  # also deletes its moves
+    def add_goal_move(
+        self, goal_id: str, amount_cents: int, person: Person, note: str = ""
+    ) -> GoalMove: ...
+    def list_goal_moves(self, goal_id: str, limit: int = 50) -> list[GoalMove]: ...
+    def delete_goal_move(self, move_id: str) -> None: ...
+
+    # --- per-person preferences (each person sees only their own) -----------------------
+    def get_prefs(self) -> Prefs:
+        """Defaults if none saved."""
+        ...
+    def save_prefs(self, **fields: object) -> Prefs:
+        """Upsert. accent in Accent; pinned: <=6 known page keys; start_page known key."""
+        ...
+
+    # --- unified archive: nothing archived may be un-restorable -----------------------
+    def list_archived_items(self, limit: int = DEFAULT_LIMIT) -> list[ArchivedItem]:
+        """Archived meals, bills, notes, expenses, templates, events, goals, subtasks,
+        newest archived first (each source capped at `limit`)."""
+        ...
+    def restore_item(self, kind: ArchivedKind, item_id: str) -> None:
+        """Clears archived_at for any ArchivedKind (adds goal/subtask/event restore too).
+        NotFoundError if missing; ValidationError for an unknown kind."""
+        ...
+
+    # --- permanent delete (round 4). Works on active OR archived rows; raises NotFoundError
+    # if the id does not exist. Deleting a task also deletes its subtasks. ---------------
+    def delete_task(self, task_id: str) -> None: ...
+    def delete_subtask(self, subtask_id: str) -> None: ...
+    def delete_grocery(self, item_id: str) -> None: ...
+    def delete_checked_grocery(self) -> int:
+        """Permanently deletes all checked, non-archived items; returns count."""
+        ...
+    def delete_meal(self, meal_id: str) -> None: ...
+    def delete_bill(self, bill_id: str) -> None: ...
+    def delete_note(self, note_id: str) -> None: ...
+    def delete_expense(self, expense_id: str) -> None: ...
+    def delete_template(self, template_id: str) -> None: ...
+    def purge_archived(self) -> int:
+        """Permanently deletes every archived row in every table; returns total count."""
         ...
 
     # --- storage meter ---------------------------------------------------

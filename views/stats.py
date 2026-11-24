@@ -8,9 +8,16 @@ import streamlit as st
 
 from core.errors import RepositoryError
 from core.repo import Person, Repository, Task
-from core.stats import chores_by_person, weekly_counts
+from core.stats import (
+    chores_by_person,
+    points_by_person,
+    streak_days,
+    weekly_counts,
+    weekly_leader,
+)
 from ui import state, theme
 from ui.common import friendly, load, now_local, show_flash, today
+from ui.grouping import week_start
 
 WEEKS = 4
 LIMIT = 500
@@ -64,6 +71,20 @@ def render() -> None:
     done = _load_done(repo)
     rows = weekly_counts(done, members, now, weeks=WEEKS, tz_name=state.secret("APP_TZ") or None)
     this_week = rows[-1][1] if rows else {}
+    tz = state.secret("APP_TZ") or None
+    pts = points_by_person(done, members, week_start(now), tz)
+    leader = weekly_leader(done, members, now, tz)
+    theme.section("Points and streaks")
+    theme.tiles([
+        (f"{pts['nick']}", "Nick pts this week", "accent"),
+        (f"{pts['natalie']}", "Natalie pts this week", "accent"),
+        (f"{streak_days(done, members, 'nick', now, tz)}d", "Nick streak", "ok"),
+        (f"{streak_days(done, members, 'natalie', now, tz)}d", "Natalie streak", "ok"),
+    ])
+    if leader:
+        theme.pills(theme.person_badge(leader), theme.badge("leads this week", "ok"))
+    else:
+        theme.pills(theme.badge("All square this week", "neutral"))
     theme.section("Chores done this week")
     _totals_cards(this_week)
     theme.section(f"Last {WEEKS} weeks")

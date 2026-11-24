@@ -1,7 +1,6 @@
 """Round 2 repository features against SQLite in-memory."""
 from __future__ import annotations
 
-import inspect
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 
@@ -326,22 +325,3 @@ def test_old_database_file_is_migrated(tmp_path) -> None:
     repo = SqliteRepository(path)
     assert repo.add_task("t", priority="low").priority == "low"
     assert repo.add_grocery("g", category="meat").category == "meat"
-
-
-# ---- no hard deletes -----------------------------------------------------
-def test_no_repo_method_deletes_rows() -> None:
-    import core.sqlite_repo as mod
-    import core.supabase_repo as smod
-
-    for module in (mod, smod):
-        source = inspect.getsource(module).lower()
-        assert "delete from" not in source and ".delete(" not in source
-    repo = SqliteRepository(":memory:", user_id="u")
-    repo.add_task("t")
-    repo.add_grocery("g")
-    repo.add_meal(date(2025, 1, 1), "m")
-    repo.add_bill("b", 1, date(2025, 1, 1))
-    repo.add_note("n")
-    for table in ("tasks", "grocery_items", "meals", "bills", "notes"):
-        with pytest.raises(sqlite3.DatabaseError):
-            repo._conn.execute(f"DELETE FROM {table}")

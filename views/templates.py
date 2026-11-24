@@ -7,7 +7,7 @@ import streamlit as st
 
 from core.repo import Repository, Template
 from ui import state, theme
-from ui.common import load, run, run_value, show_flash, today
+from ui.common import archive_item, confirm_delete, load, run, run_value, show_flash, today
 
 KINDS = {"shopping": "Shopping lists", "recipe": "Recipes"}
 SLOTS = ("breakfast", "lunch", "dinner")
@@ -28,8 +28,8 @@ def _save(repo: Repository, tid: str) -> None:
         ok="Template saved.")
 
 
-def _archive(repo: Repository, tid: str) -> None:
-    run(repo.archive_template, tid, ok="Template archived.")
+def _archive(repo: Repository, tid: str, title: str) -> None:
+    archive_item("template", repo.archive_template, tid, title, "Template archived.")
 
 
 def _to_grocery(repo: Repository, tid: str) -> None:
@@ -49,11 +49,11 @@ def _plan(repo: Repository, tpl: Template) -> None:
 
 
 def _plan_popover(repo: Repository, tpl: Template) -> None:
-    with st.popover("Plan this recipe", icon=":material/event:", use_container_width=True):
+    with st.popover("Plan this recipe", icon=":material/event:", width="stretch"):
         st.date_input("Day", value=today(), format="YYYY-MM-DD", key=f"tp_{tpl.id}_day")
         st.selectbox("Meal", SLOTS, index=2, format_func=str.title, key=f"tp_{tpl.id}_slot")
         st.button("Add to meal plan", type="primary", key=f"tp_{tpl.id}_plan", on_click=_plan,
-                  args=(repo, tpl), use_container_width=True)
+                  args=(repo, tpl), width="stretch")
 
 
 def _card(repo: Repository, tpl: Template) -> None:
@@ -62,18 +62,20 @@ def _card(repo: Repository, tpl: Template) -> None:
         st.write(f"**{tpl.name}**")
         theme.pills(theme.badge(f"{len(lines)} items", "accent"))
         st.button("Add to grocery", icon=":material/shopping_cart:", key=f"tp_{tpl.id}_g",
-                  on_click=_to_grocery, args=(repo, tpl.id), use_container_width=True)
+                  on_click=_to_grocery, args=(repo, tpl.id), width="stretch")
         if tpl.kind == "recipe":
             _plan_popover(repo, tpl)
         with st.expander("Edit"):
             st.text_input("Name", value=tpl.name, key=f"tp_{tpl.id}_n")
             st.text_area("One per line", value=tpl.items, key=f"tp_{tpl.id}_i", height=160)
             st.button("Save changes", type="primary", key=f"tp_{tpl.id}_s", on_click=_save,
-                      args=(repo, tpl.id), use_container_width=True)
-            with st.popover("Archive", icon=":material/inventory_2:", use_container_width=True):
-                st.write("Archive this template? It is hidden but kept.")
+                      args=(repo, tpl.id), width="stretch")
+            with st.popover("Archive", icon=":material/inventory_2:", width="stretch"):
+                st.write("Archive this template? It is hidden, and you can restore it any time.")
                 st.button("Yes, archive", key=f"tp_{tpl.id}_x", on_click=_archive,
-                          args=(repo, tpl.id), use_container_width=True)
+                          args=(repo, tpl.id, tpl.name), width="stretch")
+            confirm_delete(f"tpl_{tpl.id}", repo.delete_template, tpl.id, what="this template",
+                           ok="Template deleted.")
 
 
 def render() -> None:
@@ -87,7 +89,7 @@ def render() -> None:
     with st.expander("Create a template", icon=":material/add:"):
         st.text_input("Name", key="tp_name", placeholder="Weekly shop")
         st.text_area("One item per line", key="tp_items", height=140)
-        st.button("Save template", type="primary", use_container_width=True, on_click=_add,
+        st.button("Save template", type="primary", width="stretch", on_click=_add,
                   args=(repo, kind), key="tp_add")
     templates: list[Template] = load(lambda: repo.list_templates(kind, limit=LIMIT))
     if not templates:

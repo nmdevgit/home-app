@@ -8,7 +8,7 @@ import streamlit as st
 from core.repo import Bill, BillRecurrence, Repository
 from core.rules import monthly_equivalent_cents
 from ui import state, theme
-from ui.common import flash, load, run, show_flash, today
+from ui.common import archive_item, confirm_delete, flash, load, run, show_flash, today
 from ui.grouping import bill_status
 from ui.money import format_cents, parse_cents
 
@@ -63,8 +63,8 @@ def _paid(repo: Repository, bill_id: str) -> None:
     run(repo.mark_bill_paid, bill_id, ok="Marked paid.")
 
 
-def _archive(repo: Repository, bill_id: str) -> None:
-    run(repo.archive_bill, bill_id, ok="Bill archived.")
+def _archive(repo: Repository, bill_id: str, title: str) -> None:
+    archive_item("bill", repo.archive_bill, bill_id, title, "Bill archived.")
 
 
 def _edit(repo: Repository, bill: Bill) -> None:
@@ -75,11 +75,13 @@ def _edit(repo: Repository, bill: Bill) -> None:
     st.selectbox("Repeats", RECURRENCES, index=RECURRENCES.index(bill.recurrence),
                  key=f"{key}_r")
     st.button("Save", key=f"{key}_s", type="primary", on_click=_save,
-              args=(repo, bill.id), use_container_width=True)
-    with st.popover("Archive", use_container_width=True):
-        st.write("Archive this bill? It is hidden but kept.")
+              args=(repo, bill.id), width="stretch")
+    with st.popover("Archive", width="stretch"):
+        st.write("Archive this bill? It is hidden, and you can restore it any time.")
         st.button("Yes, archive", key=f"{key}_x", on_click=_archive,
-                  args=(repo, bill.id), use_container_width=True)
+                  args=(repo, bill.id, bill.name), width="stretch")
+    confirm_delete(f"bill_{bill.id}", repo.delete_bill, bill.id, what="this bill",
+                   ok="Bill deleted.")
 
 
 def _bill(repo: Repository, bill: Bill, now: date) -> None:
@@ -92,7 +94,7 @@ def _bill(repo: Repository, bill: Bill, now: date) -> None:
         )
         if status != "paid":
             st.button("Mark paid", key=f"bp_{bill.id}", icon=":material/check:",
-                      on_click=_paid, args=(repo, bill.id), use_container_width=True)
+                      on_click=_paid, args=(repo, bill.id), width="stretch")
         with st.expander("Edit"):
             _edit(repo, bill)
 
@@ -103,7 +105,7 @@ def _add_form(repo: Repository) -> None:
         st.text_input("Amount ($)", key="b_amt", placeholder="45.20")
         st.date_input("Due date", value=today(), format="YYYY-MM-DD", key="b_due")
         st.selectbox("Repeats", RECURRENCES, key="b_rec")
-        st.button("Add bill", type="primary", use_container_width=True, on_click=_add,
+        st.button("Add bill", type="primary", width="stretch", on_click=_add,
                   args=(repo,), key="b_add")
 
 

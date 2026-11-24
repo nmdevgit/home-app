@@ -264,14 +264,3 @@ def test_export_limit_clamped(repo: SqliteRepository) -> None:
     assert len(repo.export_rows("tasks", limit=10**9)) == 3
 
 
-# ---- no deletes -----------------------------------------------------------------
-
-
-@pytest.mark.parametrize("table", ["subtasks", "expenses", "templates"])
-def test_new_tables_reject_delete(repo: SqliteRepository, table: str) -> None:
-    task = repo.add_task("t")
-    repo.add_subtask(task.id, "s")
-    repo.add_expense(date(2025, 1, 1), "e", 100, "nick")
-    repo.add_template("shopping", "n", "i")
-    with pytest.raises(sqlite3.DatabaseError):
-        repo._conn.execute(f"DELETE FROM {table}")

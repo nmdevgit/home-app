@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import UTC, date
 
 import pytest
@@ -154,16 +153,6 @@ def test_grocery_flow(repo: SqliteRepository) -> None:
 def test_grocery_validation(repo: SqliteRepository, name: str, qty: str) -> None:
     with pytest.raises(ValidationError):
         repo.add_grocery(name, qty)
-
-
-def test_no_delete_path(repo: SqliteRepository) -> None:
-    assert not [n for n in dir(repo) if "delete" in n.lower() or "remove" in n.lower()]
-    task = repo.add_task("keep")
-    repo.add_grocery("keep")
-    for table in ("tasks", "grocery_items"):
-        with pytest.raises(sqlite3.DatabaseError, match="not allowed"):
-            repo._conn.execute(f"DELETE FROM {table}")
-    assert repo.list_tasks()[0].id == task.id
 
 
 def test_persists_on_disk(tmp_path) -> None:

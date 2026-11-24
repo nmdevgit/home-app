@@ -6,7 +6,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from core.repo import Repository
+from core.repo import Prefs, Repository
 from ui.grouping import PEOPLE
 
 DEV_DB_PATH = Path(__file__).resolve().parent.parent / "dev_home.db"
@@ -107,5 +107,33 @@ def sign_out() -> None:
 
 
 def _clear() -> None:
-    for key in ("repo", "me", "client"):
+    for key in ("repo", "me", "client", "_prefs", "_nav_pages"):
         st.session_state.pop(key, None)
+
+
+def prefs() -> Prefs:
+    """This person's look-and-feel prefs, cached per session (defaults on any failure)."""
+    from core.errors import RepositoryError
+
+    cached = st.session_state.get("_prefs")
+    if cached is not None:
+        return cached
+    repo = current_repo()
+    value = Prefs()
+    if repo is not None:
+        try:
+            value = repo.get_prefs()
+        except RepositoryError:
+            value = Prefs()
+    st.session_state["_prefs"] = value
+    return value
+
+
+def save_prefs(**fields: object) -> Prefs:
+    """Save prefs through the repo and refresh the session cache. Raises RepositoryError."""
+    repo = current_repo()
+    if repo is None:
+        return Prefs()
+    value = repo.save_prefs(**fields)
+    st.session_state["_prefs"] = value
+    return value

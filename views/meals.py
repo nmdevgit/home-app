@@ -7,7 +7,7 @@ import streamlit as st
 
 from core.repo import Meal, Repository
 from ui import state, theme
-from ui.common import load, run, run_value, show_flash, today
+from ui.common import archive_item, confirm_delete, load, run, run_value, show_flash, today
 from ui.grouping import week_start
 
 SLOTS = ("breakfast", "lunch", "dinner")
@@ -42,8 +42,8 @@ def _save(repo: Repository, meal_id: str) -> None:
         ok="Meal saved.")
 
 
-def _archive(repo: Repository, meal_id: str) -> None:
-    run(repo.archive_meal, meal_id, ok="Meal archived.")
+def _archive(repo: Repository, meal_id: str, title: str) -> None:
+    archive_item("meal", repo.archive_meal, meal_id, title, "Meal archived.")
 
 
 def _to_grocery(repo: Repository, meal_id: str) -> None:
@@ -67,14 +67,16 @@ def _meal_details(repo: Repository, meal: Meal) -> None:
                      key=f"{key}_s")
         st.text_area("Ingredients (one per line)", value=meal.ingredients, key=f"{key}_i")
         st.button("Save", key=f"{key}_save", type="primary", on_click=_save,
-                  args=(repo, meal.id), use_container_width=True)
+                  args=(repo, meal.id), width="stretch")
         if meal.ingredients.strip():
             st.button("Add ingredients to grocery", key=f"{key}_g", on_click=_to_grocery,
-                      args=(repo, meal.id), use_container_width=True)
-        with st.popover("Archive", use_container_width=True):
-            st.write("Archive this meal? It is hidden but kept.")
+                      args=(repo, meal.id), width="stretch")
+        with st.popover("Archive", width="stretch"):
+            st.write("Archive this meal? It is hidden, and you can restore it any time.")
             st.button("Yes, archive", key=f"{key}_a", on_click=_archive,
-                      args=(repo, meal.id), use_container_width=True)
+                      args=(repo, meal.id, meal.title), width="stretch")
+        confirm_delete(f"meal_{meal.id}", repo.delete_meal, meal.id, what="this meal",
+                       ok="Meal deleted.")
 
 
 def _add_form(week: date) -> None:
@@ -86,7 +88,7 @@ def _add_form(week: date) -> None:
         st.selectbox("Meal", SLOTS, index=2, format_func=str.title, key="m_slot")
         st.text_input("Title", key="m_title")
         st.text_area("Ingredients (one per line)", key="m_ing")
-        st.button("Add meal", type="primary", use_container_width=True, on_click=_add,
+        st.button("Add meal", type="primary", width="stretch", on_click=_add,
                   args=(repo,), key="m_add")
 
 
@@ -98,12 +100,13 @@ def render() -> None:
     show_flash()
     st.session_state.setdefault("m_week", week_start(today()))
     week: date = st.session_state["m_week"]
-    prev_col, mid_col, next_col = st.columns(3)
-    prev_col.button("Prev", icon=":material/chevron_left:", on_click=_shift_week, args=(-7,),
-                    use_container_width=True)
-    mid_col.button("This week", on_click=_this_week, use_container_width=True)
-    next_col.button("Next", icon=":material/chevron_right:", on_click=_shift_week, args=(7,),
-                    use_container_width=True)
+    with st.container(key="navrow_meals"):
+        prev_col, mid_col, next_col = st.columns(3)
+        prev_col.button("", icon=":material/chevron_left:", on_click=_shift_week, args=(-7,),
+                        width="stretch", help="Previous week")
+        mid_col.button("This week", on_click=_this_week, width="stretch")
+        next_col.button("", icon=":material/chevron_right:", on_click=_shift_week, args=(7,),
+                        width="stretch", help="Next week")
     end = week + timedelta(days=6)
     st.caption(theme.week_label(week))
     _add_form(week)

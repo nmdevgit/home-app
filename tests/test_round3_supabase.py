@@ -129,12 +129,3 @@ def test_export_pages_beyond_1000(repo: SupabaseRepository, client: FakeClient) 
     assert len(repo.export_rows("notes", limit=10**6)) == 1500
 
 
-def test_no_delete_calls(repo: SupabaseRepository, client: FakeClient) -> None:
-    t = repo.add_task("a")
-    s = repo.add_subtask(t.id, "s")
-    e = repo.add_expense(date(2025, 1, 1), "e", 5, "nick")
-    tpl = repo.add_template("shopping", "n", "i")
-    repo.archive_subtask(s.id)
-    repo.archive_expense(e.id)
-    repo.archive_template(tpl.id)
-    assert all(op != "delete" for _t, op in client.log)
