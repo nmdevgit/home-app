@@ -299,3 +299,16 @@ h2 { font-size: 1.1rem; } h3 { font-size: 1rem; }
 .hh-cart-spacer { height: 3.6rem; }
 [class*="st-key-undo_bar"] [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
 [class*="st-key-undo_bar"] [data-testid^="stBaseButton"] { padding: 0.25rem 0.5rem; min-height: 2.5rem; }
+
+/* Phone browsers (iOS Safari / Samsung Internet / Streamlit Cloud badge): the full-height
+   scroll area extends under the browser toolbar, hiding the last ~80px of every page behind
+   the fixed tab bar. Use the dynamic (visible) viewport height and leave generous clearance
+   so the last card can always be scrolled fully above the tab bar, cart bar and badges. */
+html, body, .stApp, [data-testid="stAppViewContainer"] { height: 100%; }
+@supports (height: 100dvh) {
+  .stApp, [data-testid="stAppViewContainer"] { height: 100dvh !important; }
+}
+.block-container {
+  padding-bottom: calc(var(--hh-tabbar) + 6.5rem + env(safe-area-inset-bottom)) !important;
+}
+.block-container::after { content: ""; display: block; height: 3rem; }

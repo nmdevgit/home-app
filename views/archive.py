@@ -11,6 +11,7 @@ from ui import state, theme
 from ui.common import clock, confirm_delete, load, now_local, run, show_flash
 
 LIMIT = 200
+BULK_MAX = 50  # repo.bulk_delete_tasks accepts at most 50 ids
 
 
 def _restore_task(repo: Repository, task_id: str) -> None:
@@ -85,12 +86,19 @@ def _done_tab(repo: Repository) -> None:
     done: list[Task] = load(lambda: repo.list_done_tasks(since, limit=LIMIT))
     if not done:
         theme.empty("Nothing completed yet", "Finished tasks from the last 7 days show up here.")
+    elif len(done) <= BULK_MAX:
+        ids = [t.id for t in done]
+        confirm_delete("done_all", repo.bulk_delete_tasks, ids,
+                       what=f"all {len(done)} finished tasks shown here",
+                       ok="Finished tasks deleted.", label="Delete all finished")
     for task in done:
         when = task.completed_at.astimezone(zone) if task.completed_at else None
         stamp = f"{when:%a %d %b, %H:%M}" if when else "unknown time"
         with st.container(key=f"card_done_{task.id}"):
             st.write(f"**{task.title}**")
             theme.pills(theme.person_badge(task.assignee), theme.badge(stamp))
+            confirm_delete(f"dn_{task.id}", repo.delete_task, task.id, what="this finished task",
+                           ok="Task deleted.")
 
 
 def render() -> None:
